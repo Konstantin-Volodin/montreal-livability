@@ -1,6 +1,8 @@
 import dagster as dg
 import geopandas as gpd
 
+from dagster_quickstart.defs.resources import ArcGISFeatureServerResource, S3DataStore
+
 @dg.asset(
     group_name="raw_data",
     metadata={

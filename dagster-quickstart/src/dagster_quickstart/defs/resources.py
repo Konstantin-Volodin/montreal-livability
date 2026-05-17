@@ -1,5 +1,12 @@
 
-from dagster import ConfigurableResource, AssetExecutionContext, MetadataValue
+from dagster import (
+    ConfigurableResource,
+    AssetExecutionContext,
+    MetadataValue,
+    Definitions,
+    EnvVar,
+    definitions,
+)
 from dagster_aws.s3 import S3Resource
 
 import requests
@@ -400,3 +407,19 @@ class ArcGISFeatureServerResource(ConfigurableResource):
         if 'geometry' in preview_df.columns:
             preview_df = preview_df.drop(columns=['geometry'])
         return preview_df.to_markdown()
+
+
+@definitions
+def resources() -> Definitions:
+    """Bind resources into the autoloaded defs folder."""
+    return Definitions(
+        resources={
+            "s3_datastore": S3DataStore(
+                aws_access_key_id=EnvVar("S3_ACCESS_KEY"),
+                aws_secret_access_key=EnvVar("S3_SECRET_KEY"),
+                region_name=EnvVar("S3_REGION"),
+                bucket_name=EnvVar("S3_BUCKET"),
+            ),
+            "feature_server": ArcGISFeatureServerResource(),
+        }
+    )
