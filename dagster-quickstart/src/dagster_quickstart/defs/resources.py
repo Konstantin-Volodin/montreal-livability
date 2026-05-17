@@ -130,6 +130,51 @@ class S3DataStore(ConfigurableResource):
             context.log.error(f"Failed to upload file: {e}")
             raise
 
+    def write_html(self, context: AssetExecutionContext, html: str) -> str:
+        """
+        Save an HTML document (e.g. an interactive Plotly map) to Amazon S3.
+
+        Reuses the same key scheme as ``write_gpq`` but swaps the extension to
+        ``.html`` and sets a browser-friendly content type so the object can be
+        opened directly via a presigned/public URL.
+
+        Args:
+            context (AssetExecutionContext): The context for the operation.
+            html (str): The HTML document to upload.
+
+        Returns:
+            str: The full S3 path the document was written to.
+        """
+        try:
+            object_key = self._get_s3_key(context).replace(".geoparquet", ".html")
+            full_path = self._base_path / object_key
+            body = html.encode("utf-8")
+
+            self._s3.put_object(
+                Bucket=self.bucket_name,
+                Key=object_key,
+                Body=body,
+                ContentType="text/html; charset=utf-8",
+            )
+            context.log.info(f"Uploaded HTML to {full_path}")
+
+            presigned_url = self._s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": self.bucket_name, "Key": object_key},
+                ExpiresIn=7 * 24 * 3600,  # 7 days
+            )
+
+            context.add_output_metadata({
+                "s3_write_location": MetadataValue.text(str(full_path)),
+                "s3_file_size_written": MetadataValue.text(format_size(len(body))),
+                "interactive_map_url": MetadataValue.url(presigned_url),
+            })
+            return presigned_url
+
+        except Exception as e:
+            context.log.error(f"Failed to upload HTML: {e}")
+            raise
+
     def read_gpq_single_key(self, context: AssetExecutionContext, key: str) -> gpd.GeoDataFrame:
         """
         Load a GeoDataFrame from Amazon S3 using a specific key.

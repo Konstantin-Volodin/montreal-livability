@@ -98,7 +98,7 @@ def tx_med_household_income(context: dg.AssetExecutionContext, feature_server: A
     deps = [texas_trunk_system, tx_med_household_income, texas_county_boundaries]
 )
 def trunk_median_income(context: dg.AssetExecutionContext, s3_datastore: S3DataStore) -> dg.MaterializeResult:
-    """Joins Texas trunk system to median household income. Filters by select counties."""
+    """Joins Texas trunk system to median household income across all Texas counties."""
 
     # Fetch trunk system
     ts_key_pattern = "landing/txdot/vector/texas_trunk_system/partitions"
@@ -112,15 +112,97 @@ def trunk_median_income(context: dg.AssetExecutionContext, s3_datastore: S3DataS
     tx_counties_pattern = 'landing/txdot/vector/texas_county_boundaries/full_snapshots'
     tx_counties = s3_datastore.read_gpq_latest_snapshot(context, tx_counties_pattern)
     
-    # Filter counties
-    county_list = ['Williamson','Travis', 'Hays', 'Bell','Milam', 'Lee', 'Bastrop', 'Caldwell', 'Guadalupe', 'Gonzales', 'Bexar', 'Comal', 'Fayette', 'Wilson']
-    tx_counties = tx_counties[tx_counties['CNTY_NM'].isin(county_list)]
-
     # Join median income tracts to trunk system
     combined_gdf = gpd.sjoin(med_income_tracts, trunk_system, how="inner", predicate="intersects")
-    
-    # Clip combined gdf to only our desired county boundary areas
+
+    # Clip to the full set of Texas county boundaries (all 254 counties)
     combined_gdf = combined_gdf.clip(tx_counties)
     s3_datastore.write_gpq(context, combined_gdf)
-    
+
     return combined_gdf
+
+
+@dg.asset(
+    group_name='analytics',
+    metadata={"layer": "enriched", "source": "analytics", "data_category": "viz", "segmentation": "full_snapshots"},
+    deps=[trunk_median_income],
+)
+def trunk_median_income_map(context: dg.AssetExecutionContext, s3_datastore: S3DataStore) -> None:
+    """Interactive Plotly choropleth of tract median income with the trunk system overlaid."""
+    import json
+    import pandas as pd
+    import plotly.express as px
+    import plotly.graph_objects as go
+
+    # fetch the analytics data
+    combined_pattern = "enriched/analytics/vector/trunk_median_income/full_snapshots"
+    combined = s3_datastore.read_gpq_latest_snapshot(context, combined_pattern)
+
+    # fetch trunk system
+    ts_key_pattern = "landing/txdot/vector/texas_trunk_system/partitions"
+    trunk = s3_datastore.read_gpq_all_partitions(context, ts_key_pattern)
+
+    if combined.empty:
+        raise ValueError("trunk_median_income produced no rows — nothing to map.")
+
+    # Plotly maps need lon/lat (EPSG:4326)
+    combined = combined.set_crs(4326, allow_override=True) if combined.crs is None else combined.to_crs(4326)
+    combined = combined[combined.geometry.notna() & ~combined.geometry.is_empty].reset_index(drop=True)
+
+    # ACS overall median household income (B19049_001E)
+    income_col = "B19049_001E"
+    combined[income_col] = pd.to_numeric(combined[income_col], errors="coerce")
+    context.log.info(f"Coloring by '{income_col}'")
+
+    geojson = json.loads(combined[[combined.geometry.name]].to_json())
+    minx, miny, maxx, maxy = combined.total_bounds
+
+    fig = px.choropleth_map(
+        combined,
+        geojson=geojson,
+        locations=combined.index,
+        color=income_col,
+        color_continuous_scale="Reds",
+        map_style="carto-positron",
+        center={"lat": (miny + maxy) / 2, "lon": (minx + maxx) / 2},
+        zoom=7,
+        opacity=0.7,
+        labels={income_col: "Median household income"},
+    )
+
+    # Overlay the trunk highway lines in black
+    if not trunk.empty:
+        trunk = trunk.to_crs(4326)
+        lats: list = []
+        lons: list = []
+        for geom in trunk.geometry:
+            if geom is None or geom.is_empty: continue
+            parts = geom.geoms if geom.geom_type == "MultiLineString" else [geom]
+            for line in parts:
+                x, y = line.xy
+                lons += list(x) + [None]
+                lats += list(y) + [None]
+        fig.add_trace(go.Scattermap(
+            lat=lats, lon=lons, mode="lines",
+            line=dict(width=2, color="black"),
+            name="Trunk system", hoverinfo="skip",
+        ))
+
+    fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), autosize=True)
+
+    # default_width/height make the saved HTML fill the browser window
+    html = fig.to_html(
+        include_plotlyjs="cdn",
+        full_html=True,
+        default_width="100%",
+        default_height="100vh",
+    )
+    s3_datastore.write_html(context, html)
+
+    # Log metadata about the map for observability
+    context.add_output_metadata({
+        "income_column": dg.MetadataValue.text(income_col),
+        "tracts_plotted": dg.MetadataValue.int(len(combined)),
+    })
+
+
