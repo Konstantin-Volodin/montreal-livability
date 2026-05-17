@@ -220,8 +220,6 @@ def trunk_median_income_map(context: dg.AssetExecutionContext, s3_datastore: S3D
     })
 
 
-all_assets_job = dg.define_asset_job(name="all_assets_job")
-
 texas_job = dg.define_asset_job(
     name="texas_job", 
     selection=[
