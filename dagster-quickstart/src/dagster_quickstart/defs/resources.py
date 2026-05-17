@@ -11,49 +11,55 @@ import pandas as pd
 from upath import UPath
 from pydantic import PrivateAttr
 from datetime import datetime
+from typing import Optional
 
 def format_size(size_bytes):
     return f"{size_bytes / (1024 * 1024):.2f} MB"
 
-class CloudflareR2DataStore(ConfigurableResource):
+class S3DataStore(ConfigurableResource):
     """
-    Custom resource for handling GeoParquet files stored in Cloudflare R2.
+    Custom resource for handling GeoParquet files stored in Amazon S3.
 
     This manager supports various partition types and handles cases where data might be missing.
 
     Attributes:
-        endpoint_url (str): The endpoint URL for Cloudflare R2.
-        access_key_id (str): The access key ID for authentication.
-        secret_access_key (str): The secret access key for authentication.
+        aws_access_key_id (str): The AWS access key ID for authentication.
+        aws_secret_access_key (str): The AWS secret access key for authentication.
+        region_name (str): The AWS region the bucket lives in.
         bucket_name (str): The name of the bucket to use.
+        endpoint_url (Optional[str]): Optional custom endpoint URL for
+            S3-compatible stores. Leave unset for standard Amazon S3.
     """
-    endpoint_url: str
-    access_key_id: str
-    secret_access_key: str
+    aws_access_key_id: str
+    aws_secret_access_key: str
+    region_name: str
     bucket_name: str
+    endpoint_url: Optional[str] = None
 
     _base_path: UPath = PrivateAttr()
-    _r2: boto3.client = PrivateAttr()
+    _s3: boto3.client = PrivateAttr()
 
     def setup_for_execution(self, context):
         """
-        Initialize the Cloudflare R2 client for execution.
+        Initialize the Amazon S3 client for execution.
 
         Args:
             context: The execution context.
         """
-        self._base_path = UPath(f"https://{self.endpoint_url}/{self.bucket_name}")
-        self._r2 = boto3.client(
-            's3',
-            aws_access_key_id=self.access_key_id,
-            aws_secret_access_key=self.secret_access_key,
-            endpoint_url=self.endpoint_url
-        )
-        context.log.info(f"Initialized Cloudflare R2 client for bucket: {self.bucket_name}")
+        self._base_path = UPath(f"s3://{self.bucket_name}")
+        client_kwargs = {
+            "aws_access_key_id": self.aws_access_key_id,
+            "aws_secret_access_key": self.aws_secret_access_key,
+            "region_name": self.region_name,
+        }
+        if self.endpoint_url:
+            client_kwargs["endpoint_url"] = self.endpoint_url
+        self._s3 = boto3.client("s3", **client_kwargs)
+        context.log.info(f"Initialized Amazon S3 client for bucket: {self.bucket_name}")
 
-    def _get_r2_key(self, context: AssetExecutionContext) -> str:
+    def _get_s3_key(self, context: AssetExecutionContext) -> str:
         """
-        Generate the R2 key for storing or retrieving an object.
+        Generate the S3 key for storing or retrieving an object.
 
         This method handles both partitioned and non-partitioned assets.
 
@@ -61,7 +67,7 @@ class CloudflareR2DataStore(ConfigurableResource):
             context (AssetExecutionContext): The context for the operation.
 
         Returns:
-            str: The generated R2 key.
+            str: The generated S3 key.
         """
         asset_key = context.asset_key
         metadata = context.assets_def.metadata_by_key[asset_key]
@@ -70,19 +76,19 @@ class CloudflareR2DataStore(ConfigurableResource):
         data_category = metadata.get("data_category", "fallback_category")
         asset_name = asset_key.path[-1]
         segmentation = metadata.get("segmentation", "fallback_segmentation")
-        
+
         if context.has_partition_key:
             partition_key = context.partition_key
-            r2_key = f'{layer}/{source}/{data_category}/{asset_name}/{segmentation}/{partition_key}.geoparquet'
+            s3_key = f'{layer}/{source}/{data_category}/{asset_name}/{segmentation}/{partition_key}.geoparquet'
         else:
             timestamp = datetime.now().isoformat()
-            r2_key = f'{layer}/{source}/{data_category}/{asset_name}/{segmentation}/snapshot={timestamp}.geoparquet'
-        
-        return r2_key
+            s3_key = f'{layer}/{source}/{data_category}/{asset_name}/{segmentation}/snapshot={timestamp}.geoparquet'
+
+        return s3_key
 
     def write_gpq(self, context: AssetExecutionContext, gdf: gpd.GeoDataFrame):
         """
-        Save a GeoDataFrame to Cloudflare R2.
+        Save a GeoDataFrame to Amazon S3.
 
         Args:
             context (AssetExecutionContext): The context for the operation.
@@ -93,7 +99,7 @@ class CloudflareR2DataStore(ConfigurableResource):
             return
 
         try:
-            object_key = self._get_r2_key(context)
+            object_key = self._get_s3_key(context)
             full_path = self._base_path / object_key
             context.log.info(f"Preparing to upload to path: {full_path}")
 
@@ -102,13 +108,13 @@ class CloudflareR2DataStore(ConfigurableResource):
             buffer.seek(0)
             file_size = buffer.getbuffer().nbytes
 
-            self._r2.upload_fileobj(buffer, self.bucket_name, object_key)
+            self._s3.upload_fileobj(buffer, self.bucket_name, object_key)
             context.log.info(f"Uploaded file to {full_path}")
 
             metadata = {
-                "r2_write_location": MetadataValue.text(str(full_path)),
-                "r2_file_size_written": MetadataValue.text(format_size(file_size)),
-                "r2_num_records_written": MetadataValue.int(len(gdf)),
+                "s3_write_location": MetadataValue.text(str(full_path)),
+                "s3_file_size_written": MetadataValue.text(format_size(file_size)),
+                "s3_num_records_written": MetadataValue.int(len(gdf)),
             }
 
             context.add_output_metadata(metadata)
@@ -119,11 +125,11 @@ class CloudflareR2DataStore(ConfigurableResource):
 
     def read_gpq_single_key(self, context: AssetExecutionContext, key: str) -> gpd.GeoDataFrame:
         """
-        Load a GeoDataFrame from Cloudflare R2 using a specific key.
+        Load a GeoDataFrame from Amazon S3 using a specific key.
 
         Args:
             context (AssetExecutionContext): The context for the operation.
-            key (str): The specific R2 key to load the object from.
+            key (str): The specific S3 key to load the object from.
 
         Returns:
             gpd.GeoDataFrame: The loaded GeoDataFrame, or an empty GeoDataFrame if no data is available.
@@ -133,7 +139,7 @@ class CloudflareR2DataStore(ConfigurableResource):
             context.log.info(f"Attempting to download from path: {full_path}")
 
             buffer = io.BytesIO()
-            self._r2.download_fileobj(self.bucket_name, key, buffer)
+            self._s3.download_fileobj(self.bucket_name, key, buffer)
             buffer.seek(0)
             file_size = buffer.getbuffer().nbytes
 
@@ -141,11 +147,11 @@ class CloudflareR2DataStore(ConfigurableResource):
             context.log.info(f"Successfully downloaded file from {full_path}")
 
             metadata = {
-                "r2_read_location": MetadataValue.text(str(full_path)),
-                "r2_file_size_read": MetadataValue.text(format_size(file_size)),
-                "r2_num_records_read": MetadataValue.int(len(gdf)),
-                "r2_columns_read": MetadataValue.json(list(gdf.columns)),
-                "r2_object_preview": MetadataValue.md(self._get_head_preview(gdf)),
+                "s3_read_location": MetadataValue.text(str(full_path)),
+                "s3_file_size_read": MetadataValue.text(format_size(file_size)),
+                "s3_num_records_read": MetadataValue.int(len(gdf)),
+                "s3_columns_read": MetadataValue.json(list(gdf.columns)),
+                "s3_object_preview": MetadataValue.md(self._get_head_preview(gdf)),
             }
 
             context.add_output_metadata(metadata)
@@ -156,7 +162,7 @@ class CloudflareR2DataStore(ConfigurableResource):
 
     def read_gpq_all_partitions(self, context: AssetExecutionContext, key_pattern: str) -> gpd.GeoDataFrame:
         """
-        Load a GeoDataFrame from Cloudflare R2 for all partitions matching a key pattern.
+        Load a GeoDataFrame from Amazon S3 for all partitions matching a key pattern.
 
         Args:
             context (AssetExecutionContext): The context for the operation.
@@ -166,7 +172,7 @@ class CloudflareR2DataStore(ConfigurableResource):
             gpd.GeoDataFrame: The combined GeoDataFrame from all partitions.
         """
         try:
-            paginator = self._r2.get_paginator('list_objects_v2')
+            paginator = self._s3.get_paginator('list_objects_v2')
             pages = paginator.paginate(Bucket=self.bucket_name, Prefix=key_pattern)
 
             all_gdfs = []
@@ -192,12 +198,12 @@ class CloudflareR2DataStore(ConfigurableResource):
             context.log.info(f"Combined GeoDataFrame with {len(combined_gdf)} total records")
 
             metadata = {
-                "r2_key_pattern": MetadataValue.text(key_pattern),
-                "r2_read_location": MetadataValue.text(str(self._base_path / key_pattern)),
-                "r2_file_size_read": MetadataValue.text(format_size(total_size)),
-                "r2_num_records_read": MetadataValue.int(total_records),
-                "r2_columns_read": MetadataValue.json(list(combined_gdf.columns)),
-                "r2_object_preview": MetadataValue.md(self._get_head_preview(combined_gdf)),
+                "s3_key_pattern": MetadataValue.text(key_pattern),
+                "s3_read_location": MetadataValue.text(str(self._base_path / key_pattern)),
+                "s3_file_size_read": MetadataValue.text(format_size(total_size)),
+                "s3_num_records_read": MetadataValue.int(total_records),
+                "s3_columns_read": MetadataValue.json(list(combined_gdf.columns)),
+                "s3_object_preview": MetadataValue.md(self._get_head_preview(combined_gdf)),
             }
 
             context.add_output_metadata(metadata)
@@ -205,10 +211,10 @@ class CloudflareR2DataStore(ConfigurableResource):
         except Exception as e:
             context.log.error(f"Failed to read all partitions: {e}")
             raise
-        
+
     def read_gpq_latest_snapshot(self, context: AssetExecutionContext, key_pattern: str) -> gpd.GeoDataFrame:
         """
-        Load the latest snapshot GeoDataFrame from Cloudflare R2 based on a key pattern.
+        Load the latest snapshot GeoDataFrame from Amazon S3 based on a key pattern.
 
         Args:
             context (AssetExecutionContext): The context for the operation.
@@ -218,7 +224,7 @@ class CloudflareR2DataStore(ConfigurableResource):
             gpd.GeoDataFrame: The latest snapshot GeoDataFrame.
         """
         try:
-            paginator = self._r2.get_paginator('list_objects_v2')
+            paginator = self._s3.get_paginator('list_objects_v2')
             pages = paginator.paginate(Bucket=self.bucket_name, Prefix=key_pattern)
 
             latest_key = None
@@ -244,12 +250,12 @@ class CloudflareR2DataStore(ConfigurableResource):
             context.log.info(f"Loaded latest snapshot from {latest_key}")
 
             metadata = {
-                "r2_key_pattern": MetadataValue.text(key_pattern),
-                "r2_read_location": MetadataValue.text(str(self._base_path / latest_key)),
-                "r2_file_size_read": MetadataValue.text(format_size(obj['Size'])),
-                "r2_num_records_read": MetadataValue.int(len(gdf)),
-                "r2_columns_read": MetadataValue.json(list(gdf.columns)),
-                "r2_object_preview": MetadataValue.md(self._get_head_preview(gdf)),
+                "s3_key_pattern": MetadataValue.text(key_pattern),
+                "s3_read_location": MetadataValue.text(str(self._base_path / latest_key)),
+                "s3_file_size_read": MetadataValue.text(format_size(obj['Size'])),
+                "s3_num_records_read": MetadataValue.int(len(gdf)),
+                "s3_columns_read": MetadataValue.json(list(gdf.columns)),
+                "s3_object_preview": MetadataValue.md(self._get_head_preview(gdf)),
             }
 
             context.add_output_metadata(metadata)
