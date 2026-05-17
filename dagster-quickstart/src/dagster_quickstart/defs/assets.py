@@ -1,9 +1,16 @@
 import dagster as dg
-import requests
 import geopandas as gpd
 
-@dg.asset
-def texas_trunk_system(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+@dg.asset(
+    group_name="raw_data",
+    metadata={
+        "layer": "landing",
+        "source": "txdot",
+        "dat_category": "vector",
+        "segmentation": "snapshots",
+    }
+)
+def texas_trunk_system(context: dg.AssetExecutionContext, feature_server: ArcGISFeatureServerResource, s3_datastore: S3DataStore) -> dg.MaterializeResult:
     """ Fetches the TXDoT Texas Trunk System containing a network of divided highways intented to become >= 4 lanes."""
     
     # Define query
@@ -15,10 +22,14 @@ def texas_trunk_system(context: dg.AssetExecutionContext) -> dg.MaterializeResul
         }
     
     # Fetch data
-    response = requests.get(url, params=params)
-    data = response.json()
+    gdf = feature_server.fetch_data(
+        url, 
+        params,
+        context=context 
+    )
+
+    # write to s3
+    s3_datastore.write_gpq(context, gdf)
     
-    # Construct geodataframe
-    gdf = gpd.GeoDataFrame.from_features(data['features'], crs="EPSG:4326")
 
     return gdf
