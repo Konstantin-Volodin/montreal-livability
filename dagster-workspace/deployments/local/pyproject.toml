@@ -1,0 +1,14 @@
+[project]
+name = "dagster_workspace_local"
+requires-python = ">=3.10,<3.15"
+version = "0.1.0"
+dependencies = [
+    "dagster==1.13.5",
+    "dagster-dg-cli",
+    "dagster-webserver",
+]
+
+[tool.dg]
+directory_type = "deployment"
+
+

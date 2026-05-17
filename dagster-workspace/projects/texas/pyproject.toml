@@ -1,5 +1,5 @@
 [project]
-name = "dagster_quickstart"
+name = "texas"
 requires-python = ">=3.10,<3.15"
 version = "0.1.0"
 dependencies = [
@@ -15,7 +15,6 @@ dependencies = [
 dev = [
     "dagster-dg-cli",
     "dagster-webserver",
-    "pytest",
 ]
 
 [build-system]
@@ -29,9 +28,9 @@ force-include = { "pyproject.toml" = "pyproject.toml" }
 directory_type = "project"
 
 [tool.dg.project]
-root_module = "dagster_quickstart"
+root_module = "texas"
 registry_modules = [
-    "dagster_quickstart.components.*",
+    "texas.components.*",
 ]
 
 

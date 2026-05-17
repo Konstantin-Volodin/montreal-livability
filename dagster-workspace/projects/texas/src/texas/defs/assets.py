@@ -2,7 +2,7 @@ import dagster as dg
 import geopandas as gpd
 from datetime import datetime
 
-from dagster_quickstart.defs.resources import ArcGISFeatureServerResource, S3DataStore
+from texas.defs.resources import ArcGISFeatureServerResource, S3DataStore
 
 
 # ----- PARTITION DEFINITIONS -----
@@ -130,9 +130,11 @@ def trunk_median_income(context: dg.AssetExecutionContext, s3_datastore: S3DataS
 def trunk_median_income_map(context: dg.AssetExecutionContext, s3_datastore: S3DataStore) -> None:
     """Interactive Plotly choropleth of tract median income with the trunk system overlaid."""
     import json
+    import numpy as np
     import pandas as pd
     import plotly.express as px
     import plotly.graph_objects as go
+    from shapely import transform
 
     # fetch the analytics data
     combined_pattern = "enriched/analytics/vector/trunk_median_income/full_snapshots"
@@ -148,6 +150,18 @@ def trunk_median_income_map(context: dg.AssetExecutionContext, s3_datastore: S3D
     # Plotly maps need lon/lat (EPSG:4326)
     combined = combined.set_crs(4326, allow_override=True) if combined.crs is None else combined.to_crs(4326)
     combined = combined[combined.geometry.notna() & ~combined.geometry.is_empty].reset_index(drop=True)
+
+    # The sjoin in trunk_median_income emits one row per (tract x trunk segment)
+    rows_before = len(combined)
+    combined = combined.loc[~combined.geometry.to_wkb().duplicated()].reset_index(drop=True)
+    context.log.info(f"deduped tract geometries: {rows_before} -> {len(combined)} rows")
+
+    # Simplify polygons (~50 m tolerance) — invisible at zoom 7, huge vertex cut.
+    combined["geometry"] = combined.geometry.simplify(0.0005, preserve_topology=True)
+    combined = combined[combined.geometry.notna() & ~combined.geometry.is_empty].reset_index(drop=True)
+
+    # Truncate coordinate precision to ~5 decimals (~1 m) so the serialized
+    combined["geometry"] = transform(combined.geometry.values, lambda a: np.round(a, 5))
 
     # ACS overall median household income (B19049_001E)
     income_col = "B19049_001E"
@@ -206,3 +220,15 @@ def trunk_median_income_map(context: dg.AssetExecutionContext, s3_datastore: S3D
     })
 
 
+all_assets_job = dg.define_asset_job(name="all_assets_job")
+
+texas_job = dg.define_asset_job(
+    name="texas_job", 
+    selection=[
+        "texas_trunk_system", 
+        "tx_med_household_income", 
+        "texas_county_boundaries",
+        "trunk_median_income_map", 
+        "trunk_median_income", 
+    ]
+)
