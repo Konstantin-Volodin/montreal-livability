@@ -145,8 +145,8 @@ class S3DataStore(ConfigurableResource):
             full_path = self._base_path / key
             context.log.info(f"Attempting to download from path: {full_path}")
 
-            buffer = io.BytesIO()
-            self._s3.download_fileobj(self.bucket_name, key, buffer)
+            response = self._s3.get_object(Bucket=self.bucket_name, Key=key)
+            buffer = io.BytesIO(response["Body"].read())
             buffer.seek(0)
             file_size = buffer.getbuffer().nbytes
 

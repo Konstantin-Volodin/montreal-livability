@@ -104,9 +104,9 @@ def trunk_median_income(context: dg.AssetExecutionContext, s3_datastore: S3DataS
     ts_key_pattern = "landing/txdot/vector/texas_trunk_system/partitions"
     trunk_system = s3_datastore.read_gpq_all_partitions(context, ts_key_pattern)
     
-    # Fetch median income tracts
-    med_income_tracts_key = "landing/census_bureau/vector/tx_med_household_income/full_snapshots/snapshot=2024-07-14T15:29:10.742535.geoparquet"
-    med_income_tracts = s3_datastore.read_gpq_single_key(context, med_income_tracts_key)
+    # Fetch median income tracts (latest snapshot, since the write timestamp changes every run)
+    med_income_tracts_pattern = "landing/census_bureau/vector/tx_med_household_income/full_snapshots"
+    med_income_tracts = s3_datastore.read_gpq_latest_snapshot(context, med_income_tracts_pattern)
     
     # Fetch counties
     tx_counties_pattern = 'landing/txdot/vector/texas_county_boundaries/full_snapshots'
