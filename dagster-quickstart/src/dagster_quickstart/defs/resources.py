@@ -280,3 +280,123 @@ class S3DataStore(ConfigurableResource):
             preview_df = preview_df.drop(columns=['geometry'])
         return preview_df.to_markdown()
 
+
+class ArcGISFeatureServerResource(ConfigurableResource):
+    """
+    Resource for querying an ArcGIS FeatureServer and returning data as a GeoDataFrame.
+    """
+
+    def fetch_data(self, url: str, params: dict, crs: str = 'EPSG:4326', context=None) -> gpd.GeoDataFrame:
+        """
+        Query an ArcGIS FeatureServer and return a GeoDataFrame with the specified CRS.
+
+        Args:
+        - url (str): The base URL of the FeatureServer endpoint.
+        - params (dict): A dictionary of parameters to include in the query.
+        - crs (str): The coordinate reference system to set for the GeoDataFrame (default: 'EPSG:4326').
+        - context: The Dagster execution context (optional).
+
+        Returns:
+        - GeoDataFrame: A GeoDataFrame containing the features retrieved from the FeatureServer.
+        """
+        all_features = []
+        params = params.copy()  # Avoid modifying the original params dictionary
+        params['f'] = 'geojson'  # Ensure the response format is GeoJSON
+        params['resultOffset'] = 0  # Start from the first record
+
+        max_record_count = params.get('maxRecordCount', None)
+        
+        api_response = None
+        
+        while True:
+            try:
+                response = requests.get(url, params=params)
+                response.raise_for_status()
+                
+                if api_response is None:
+                    api_response = f"<Response [{response.status_code}]>"  # Store the response code
+
+                data = response.json()
+
+                if 'error' in data:
+                    error_message = f"Error querying FeatureServer: {data['error']}"
+                    if context:
+                        context.log.error(error_message)
+                    else:
+                        print(error_message)
+                    return gpd.GeoDataFrame()  # Return empty GeoDataFrame
+
+                # Check if 'f' = 'geojson' is not supported
+                if 'type' not in data or data['type'] != 'FeatureCollection':
+                    error_message = "The server did not return GeoJSON data. Ensure the server supports GeoJSON format."
+                    if context:
+                        context.log.error(error_message)
+                    else:
+                        print(error_message)
+                    return gpd.GeoDataFrame()  # Return empty GeoDataFrame
+
+                features = data.get('features', [])
+                all_features.extend(features)
+
+                if max_record_count and len(features) < max_record_count:
+                    break  # No more features to fetch
+
+                # Update the resultOffset for the next iteration
+                params['resultOffset'] += max_record_count if max_record_count else len(features)
+
+                # If there are no more features, break the loop
+                if not features:
+                    break
+
+            except requests.exceptions.RequestException as e:
+                error_message = f"Request failed: {e}"
+                if context:
+                    context.log.error(error_message)
+                else:
+                    print(error_message)
+                return gpd.GeoDataFrame()  # Return empty GeoDataFrame on error
+            except json.JSONDecodeError:
+                error_message = "Failed to decode JSON response."
+                if context:
+                    context.log.error(error_message)
+                else:
+                    print(error_message)
+                return gpd.GeoDataFrame()  # Return empty GeoDataFrame on error
+
+        # Convert all collected features to a GeoDataFrame
+        if not all_features:
+            return gpd.GeoDataFrame()  # Return empty GeoDataFrame if no features found
+
+        gdf = gpd.GeoDataFrame.from_features(all_features, crs=crs)
+        
+        if context:
+            context.log.info(f"Retrieved GeoDataFrame with {len(gdf)} features.")
+        
+            # Add metadata
+            metadata = {
+                "api_endpoint_url": MetadataValue.text(url),
+                "api_query_params": MetadataValue.json(params),
+                "api_response": MetadataValue.text(api_response),
+                "api_num_features": MetadataValue.int(len(gdf)),
+                "api_features_preview": MetadataValue.md(self._get_features_preview(gdf)),
+                "api_columns": MetadataValue.json(list(gdf.columns))
+            }
+            context.add_output_metadata(metadata)
+        
+        return gdf
+
+    def _get_features_preview(self, gdf: gpd.GeoDataFrame, n: int = 5) -> str:
+        """
+        Generate a preview of the GeoDataFrame, excluding the 'geometry' column if it exists.
+
+        Args:
+            gdf (gpd.GeoDataFrame): The GeoDataFrame to generate a preview for.
+            n (int): The number of rows to include in the preview.
+
+        Returns:
+            str: The markdown representation of the preview.
+        """
+        preview_df = gdf.head(n).copy()
+        if 'geometry' in preview_df.columns:
+            preview_df = preview_df.drop(columns=['geometry'])
+        return preview_df.to_markdown()
