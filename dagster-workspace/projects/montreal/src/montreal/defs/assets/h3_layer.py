@@ -20,26 +20,20 @@ def _to_wgs84(gdf):
     return gdf
 
 def _h3_index(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """Add h3_r7 (partition key) and h3_r10 (analysis) columns."""
+    """Add the h3_r10 analysis column."""
     pts = gdf.copy()
     pts["geometry"] = gdf.geometry.representative_point()
 
-    pts = pts.h3.geo_to_h3(resolution=7, set_index=False)  # -> column "h3_07"
     pts = pts.h3.geo_to_h3(resolution=10, set_index=False)  # -> column "h3_10"
 
     # to_numpy() makes the assignment position-based, immune to index reshuffling.
-    return gdf.assign(
-        h3_r7=pts["h3_07"].to_numpy(),
-        h3_r10=pts["h3_10"].to_numpy(),
-    )
+    return gdf.assign(h3_r10=pts["h3_10"].to_numpy())
 
 def _h3_linetrace(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """H3-cover line geometry (bike paths) and add h3_r7 / h3_r10 columns."""
+    """H3-cover line geometry (bike paths) and add the h3_r10 column."""
     traced = gdf.h3.linetrace(resolution=10, explode=True)  # adds "h3_linetrace"
     traced = traced[traced["h3_linetrace"].notna()].copy()
-    traced = traced.rename(columns={"h3_linetrace": "h3_r10"})
-    traced["h3_r7"] = traced["h3_r10"].map(lambda cell: h3.cell_to_parent(cell, 7))
-    return traced
+    return traced.rename(columns={"h3_linetrace": "h3_r10"})
 
 _SILVER_META = {
     "layer": "silver",
@@ -56,47 +50,38 @@ _POI_CATEGORIES = {
 
 @dg.asset(group_name="h3_indexed_data", metadata=_SILVER_META, deps=[montreal_addresses])
 def h3_montreal_addresses(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
-    """apply h3 indexing to the montreal_addresses asset; add h3_r7 and h3_r10 columns for analysis"""
+    """apply h3 indexing to the montreal_addresses asset; add h3_r10 (analysis) and h3_r7 (partition key)"""
     gdf = _to_wgs84(s3_datastore.read_gpq(context, "bronze/montreal_addresses.parquet"))
     gdf = _h3_index(gdf)
-    context.log.info(f"montreal_addresses: {len(gdf)} rows H3-indexed (r7/r10)")
+    gdf["h3_r7"] = gdf["h3_r10"].map(lambda cell: h3.cell_to_parent(cell, 7))
+    context.log.info(f"montreal_addresses: {len(gdf)} rows H3-indexed (r10 + r7 partition key)")
     s3_datastore.write_gpq(context, gdf)
     return dg.MaterializeResult()
 
 
 @dg.asset(group_name="h3_indexed_data", metadata=_SILVER_META, deps=[montreal_parks])
 def h3_montreal_parks(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
-    """apply h3 indexing to the montreal_parks asset; add h3_r7 and h3_r10 columns for analysis"""
+    """apply h3 indexing to the montreal_parks asset; add the h3_r10 analysis column"""
     gdf = _to_wgs84(s3_datastore.read_gpq(context, "bronze/montreal_parks.parquet"))
     gdf = _h3_index(gdf)
-    context.log.info(f"montreal_parks: {len(gdf)} rows H3-indexed (r7/r10)")
-    s3_datastore.write_gpq(context, gdf)
-    return dg.MaterializeResult()
-
-
-@dg.asset(group_name="h3_indexed_data", metadata=_SILVER_META, deps=[quebec_osm_pois])
-def h3_montreal_osm_pois(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
-    """apply h3 indexing to the quebec_osm_pois asset; add h3_r7 and h3_r10 columns for analysis"""
-    gdf = _to_wgs84(s3_datastore.read_gpq(context, "bronze/quebec_osm_pois.parquet"))
-    gdf = _h3_index(gdf)
-    context.log.info(f"quebec_osm_pois: {len(gdf)} rows H3-indexed (r7/r10)")
+    context.log.info(f"montreal_parks: {len(gdf)} rows H3-indexed (r10)")
     s3_datastore.write_gpq(context, gdf)
     return dg.MaterializeResult()
 
 
 @dg.asset(group_name="h3_indexed_data", metadata=_SILVER_META, deps=[montreal_transit_stops])
 def h3_montreal_transit_stops(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
-    """apply h3 indexing to the montreal_transit_stops asset; add h3_r7 and h3_r10 columns for analysis"""
+    """apply h3 indexing to the montreal_transit_stops asset; add the h3_r10 analysis column"""
     gdf = _to_wgs84(s3_datastore.read_gpq(context, "bronze/montreal_transit_stops.parquet"))
     gdf = _h3_index(gdf)
-    context.log.info(f"montreal_transit_stops: {len(gdf)} rows H3-indexed (r7/r10)")
+    context.log.info(f"montreal_transit_stops: {len(gdf)} rows H3-indexed (r10)")
     s3_datastore.write_gpq(context, gdf)
     return dg.MaterializeResult()
 
 
 @dg.asset(group_name="h3_indexed_data", metadata=_SILVER_META, deps=[montreal_bike_paths])
 def h3_montreal_bike_paths(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
-    """h3-cover the montreal_bike_paths lines (linetrace); add h3_r7 and h3_r10 columns, one row per covered r10 cell"""
+    """h3-cover the montreal_bike_paths lines (linetrace); add h3_r10, one row per covered r10 cell"""
     gdf = _to_wgs84(s3_datastore.read_gpq(context, "bronze/montreal_bike_paths.parquet"))
     gdf = _h3_linetrace(gdf)
     context.log.info(f"montreal_bike_paths: {len(gdf)} (path, r10 cell) rows H3-traced")
@@ -133,9 +118,9 @@ def h3_montreal_osm_pois(context: dg.AssetExecutionContext, s3_datastore: s3_dat
     # h3 indexing
     h3_indexed = _to_wgs84(categorized)
     h3_indexed = _h3_index(h3_indexed)
-    context.log.info("h3_montreal_osm_pois: added h3_r7 and h3_r10 columns for analysis")
+    context.log.info("h3_montreal_osm_pois: added the h3_r10 analysis column")
 
-    final = h3_indexed[["geometry", "h3_r7", "h3_r10", "name", "category"]]
+    final = h3_indexed[["geometry", "h3_r10", "name", "category"]]
     context.log.info(
         "h3_montreal_osm_pois: "
         f"{len(final)} rows across "
