@@ -1,20 +1,21 @@
 """Gold layer + visualization.
 
 `amenity_scores` turns each address's nearest-amenity distances into per-category
-0-100 scores; `livability_score` collapses those into one weighted livability
-number (weights are a Dagster `Config`, which is what the personalized-recommender
-extension reuses); `livability_map` aggregates that to H3 r9 cells and renders a
-Folium choropleth. All three are unpartitioned gold tables.
+0-100 scores (tagged with the dominant municipality); `livability_score`
+collapses those into one weighted livability number (weights are a Dagster
+`Config`, which is what the personalized-recommender extension reuses);
+`livability_map` builds an HTML report — summary pills, a municipality ranking
+table, and an embedded H3 r8 Folium map with selectable amenity layers. The
+first two are unpartitioned gold tables, the last a gold HTML artifact.
 """
 
-import branca.colormap as cm
 import dagster as dg
-import folium
 import h3
 import numpy as np
 import pandas as pd
 from shapely.geometry import Polygon
 
+from montreal.defs.assets import report
 from montreal.defs.assets.distance_layer import (
     _AMENITY_CATEGORIES,
     distances_to_amenities,
@@ -22,6 +23,50 @@ from montreal.defs.assets.distance_layer import (
 from montreal.defs.resources.lakehouse import s3_datastore
 
 _GOLD_META = {"layer": "gold", "data_category": "geospacial"}
+
+# donnees.montreal.ca `uniteevaluationfonciere` MUNICIPALITE code -> name.
+# Code 50 is all of Montréal proper; the rest are demerged on-island suburbs.
+_MUNICIPALITY_NAMES = {
+    "02": "Baie-D'Urfé",
+    "03": "Beaconsfield",
+    "04": "Côte-Saint-Luc",
+    "05": "Dollard-Des Ormeaux",
+    "06": "Dorval",
+    "07": "Hampstead",
+    "09": "L'Île-Dorval",
+    "10": "Kirkland",
+    "13": "Mont-Royal",
+    "14": "Montréal-Est",
+    "15": "Montréal-Ouest",
+    "20": "Pointe-Claire",
+    "22": "Senneville",
+    "23": "Sainte-Anne-de-Bellevue",
+    "29": "Westmount",
+    "50": "Montréal",
+}
+_UNKNOWN_MUNICIPALITY = "Inconnu"
+
+
+def _municipality_column(df: pd.DataFrame) -> str:
+    """Resolve the MUNICIPALITE column case-insensitively, or fail loudly."""
+    for col in df.columns:
+        if col.strip().lower() == "municipalite":
+            return col
+    raise ValueError(
+        "Expected a 'MUNICIPALITE' column on the address/distance frame to "
+        f"derive municipalities. Available columns: {list(df.columns)}"
+    )
+
+
+def _municipality_name(codes: pd.Series) -> pd.Series:
+    """Map raw MUNICIPALITE codes (e.g. 50, '2') to readable names."""
+    normalized = (
+        codes.astype("string")
+        .str.strip()
+        .str.split(".").str[0]  # tolerate floats like '50.0'
+        .str.zfill(2)
+    )
+    return normalized.map(_MUNICIPALITY_NAMES).fillna(_UNKNOWN_MUNICIPALITY)
 
 _SCORE_CURVE = ((100.0, 100.0), (500.0, 50.0), (1000.0, 20.0))
 def _distance_score(distances) -> np.ndarray:
@@ -49,18 +94,29 @@ def amenity_scores(
     distances = s3_datastore.read_gpq_prefix(context, "silver/distances_to_amenities.parquet/")
 
     # Score each address, then collapse to one row per r10 cell
+    municipality_col = _municipality_column(distances)
     per_address = pd.DataFrame({"h3_r10": distances["h3_r10"].to_numpy()})
+    per_address["municipality"] = _municipality_name(distances[municipality_col]).to_numpy()
     score_columns = []
     for category in _AMENITY_CATEGORIES:
         column = f"score_{category}"
         per_address[column] = _distance_score(distances[f"dist_{category}"].to_numpy())
         score_columns.append(column)
 
+    grouped = per_address.groupby("h3_r10")
     out = (
-        per_address.groupby("h3_r10")
-        .agg(n_addresses=("h3_r10", "size"), **{c: (c, "mean") for c in score_columns})
+        grouped.agg(n_addresses=("h3_r10", "size"), **{c: (c, "mean") for c in score_columns})
         .reset_index()
     )
+
+    # One r10 cell can straddle a municipal boundary; tag it with the
+    # dominant (modal) municipality of the addresses it contains.
+    def _dominant(s: pd.Series) -> str:
+        m = s.mode(dropna=True)
+        return m.iloc[0] if not m.empty else _UNKNOWN_MUNICIPALITY
+
+    municipality_by_cell = grouped["municipality"].agg(_dominant)
+    out["municipality"] = out["h3_r10"].map(municipality_by_cell).to_numpy()
 
     for category in _AMENITY_CATEGORIES:
         column = f"score_{category}"
@@ -73,7 +129,8 @@ def amenity_scores(
 
     context.log.info(
         f"amenity_scores: {len(out)} r10 cells from {len(per_address)} addresses, "
-        f"{len(_AMENITY_CATEGORIES)} score columns"
+        f"{len(_AMENITY_CATEGORIES)} score columns, "
+        f"{out['municipality'].nunique()} municipalities"
     )
     s3_datastore.write_gpq(context, out)
     return dg.MaterializeResult()
@@ -126,33 +183,43 @@ def livability_score(
     )
 
 
-def _r9_hexes(scores: pd.DataFrame, resolution: int) -> pd.DataFrame:
-    """Address-weighted livability + category breakdown per aggregated H3 cell."""
-    df = scores.dropna(subset=["h3_r10"]).copy()
-    df["h3_agg"] = df["h3_r10"].map(lambda cell: h3.cell_to_parent(cell, resolution))
-
-    # Rows are r10 cells; weight each by its address count so a sparse cell
-    # doesn't pull a dense neighbour's r9 mean around.
+def _address_weighted(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
+    """Group `df`, averaging livability + per-category scores weighted by the
+    address count of each r10 row (so a sparse cell can't drag a dense
+    neighbour's mean around). Returns one row per group + an `addresses` sum.
+    """
     value_cols = ["livability"] + [f"score_{c}" for c in _AMENITY_CATEGORIES]
 
-    def _weighted(group):
+    def _agg(group: pd.DataFrame) -> pd.Series:
         w = group["n_addresses"].to_numpy(dtype=float)
-        out = {"addresses": int(w.sum())}
-        for col in value_cols:
-            out[col] = np.average(group[col].to_numpy(dtype=float), weights=w)
-        return pd.Series(out)
+        return pd.Series({
+            "addresses": int(w.sum()),
+            **{c: np.average(group[c].to_numpy(dtype=float), weights=w) for c in value_cols},
+        })
 
-    agg = (
-        df.groupby("h3_agg")
-        .apply(_weighted, include_groups=False)
-        .reset_index()
-    )
+    return df.groupby(group_col).apply(_agg, include_groups=False).reset_index()
 
+
+def _agg_hexes(scores: pd.DataFrame, resolution: int) -> pd.DataFrame:
+    """Address-weighted livability per aggregated H3 cell, with cell polygons."""
+    df = scores.dropna(subset=["h3_r10"]).copy()
+    df["h3_agg"] = df["h3_r10"].map(lambda cell: h3.cell_to_parent(cell, resolution))
+    agg = _address_weighted(df, "h3_agg")
     # h3.cell_to_boundary -> ((lat, lng), ...); shapely wants (lng, lat).
     agg["geometry"] = agg["h3_agg"].map(
         lambda cell: Polygon([(lng, lat) for lat, lng in h3.cell_to_boundary(cell)])
     )
     return agg
+
+
+def _municipality_table(scores: pd.DataFrame) -> pd.DataFrame:
+    """Address-weighted livability per municipality, best first."""
+    df = scores.dropna(subset=["municipality"])
+    return (
+        _address_weighted(df, "municipality")
+        .sort_values("livability", ascending=False)
+        .reset_index(drop=True)
+    )
 
 
 @dg.asset(
@@ -164,50 +231,40 @@ def livability_map(
     context: dg.AssetExecutionContext,
     s3_datastore: s3_datastore,
 ) -> dg.MaterializeResult:
-    """Interactive Folium choropleth of mean livability over H3 cells (gold)."""
+    """HTML livability report: summary pills, municipality ranking, embedded map (gold)."""
     scores = s3_datastore.read_gpq(context, "gold/livability_score.parquet")
-    hexes = _r9_hexes(scores, 9)
-    context.log.info(f"livability_map: {len(hexes)} r9 cells from {len(scores)} addresses")
+    amenities = s3_datastore.read_gpq(context, "silver/amenity_points.parquet")
 
-    centroids = hexes["geometry"].map(lambda poly: poly.centroid)
-    centre = [
-        centroids.map(lambda p: p.y).mean(),
-        centroids.map(lambda p: p.x).mean(),
-    ]
-    fmap = folium.Map(location=centre, zoom_start=12, tiles="cartodbpositron")
+    hexes = _agg_hexes(scores, 8)
+    table = _municipality_table(scores)
 
-    colormap = cm.LinearColormap(
-        ["#d7191c", "#fdae61", "#ffffbf", "#a6d96a", "#1a9641"],
-        vmin=0.0,
-        vmax=100.0,
-        caption="Mean livability score",
+    weights = scores["n_addresses"].to_numpy(dtype=float)
+    stats = {
+        "addresses": int(weights.sum()),
+        "amenities": int(len(amenities)),
+        "by_category": amenities["category"].value_counts().to_dict(),
+        "mean_livability": float(
+            np.average(scores["livability"].to_numpy(dtype=float), weights=weights)
+        ),
+        "municipalities": int(table["municipality"].nunique()),
+    }
+
+    context.log.info(
+        f"livability_map: {len(hexes)} r8 cells, {stats['municipalities']} municipalities, "
+        f"{stats['addresses']} addresses, {stats['amenities']} amenities, "
+        f"mean livability {stats['mean_livability']:.1f}"
     )
-    colormap.add_to(fmap)
 
-    for row in hexes.itertuples(index=False):
-        livability = getattr(row, "livability")
-        parts = "".join(f"<br>{c}: {getattr(row, f'score_{c}'):.0f}" for c in _AMENITY_CATEGORIES)
-        folium.GeoJson(
-            row.geometry.__geo_interface__,
-            style_function=lambda _f, v=livability: {
-                "fillColor": colormap(v),
-                "color": colormap(v),
-                "weight": 0,
-                "fillOpacity": 0.6,
-            },
-            tooltip=(
-                f"<b>Livability: {livability:.0f}</b>"
-                f"<br>{row.addresses} addresses{parts}"
-            ),
-        ).add_to(fmap)
-
-    s3_datastore.write_html(context, fmap.get_root().render())
+    s3_datastore.write_html(context, report.renderreport(
+        stats=stats,
+        table=table,
+        map_html=report.build_map_html(hexes),
+    ))
     return dg.MaterializeResult(
         metadata={
-            "num_cells": dg.MetadataValue.int(len(hexes)),
-            "num_addresses": dg.MetadataValue.int(int(hexes["addresses"].sum())),
-            "mean_livability": dg.MetadataValue.float(
-                round(float(hexes["livability"].mean()), 2)
-            ),
+            "num_addresses": dg.MetadataValue.int(stats["addresses"]),
+            "num_amenities": dg.MetadataValue.int(stats["amenities"]),
+            "num_municipalities": dg.MetadataValue.int(stats["municipalities"]),
+            "mean_livability": dg.MetadataValue.float(round(stats["mean_livability"], 2)),
         }
     )
