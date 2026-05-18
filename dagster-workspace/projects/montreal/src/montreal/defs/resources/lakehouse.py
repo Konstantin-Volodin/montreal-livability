@@ -7,6 +7,7 @@ from typing import Optional
 import boto3
 import dagster as dg
 import geopandas as gpd
+import pandas as pd
 from pydantic import PrivateAttr
 from upath import UPath
 
@@ -179,6 +180,62 @@ class s3_datastore(dg.ConfigurableResource):
         except Exception as e:
             context.log.error(f"Failed to read file from S3: {e}")
             raise
+
+    def read_gpq_prefix(self, context, prefix: str) -> gpd.GeoDataFrame:
+        """Read and concatenate every ``*.parquet`` object under a prefix.
+
+        Lets an unpartitioned consumer (the viz layer) read the whole of an
+        r7-partitioned asset that was written one object per partition under
+        ``{layer}/{asset}.parquet/``.
+        """
+        paginator = self._s3.get_paginator("list_objects_v2")
+        keys = [
+            obj["Key"]
+            for page in paginator.paginate(Bucket=self.bucket_name, Prefix=prefix)
+            for obj in page.get("Contents", [])
+            if obj["Key"].endswith(".parquet")
+        ]
+        if not keys:
+            raise FileNotFoundError(f"No parquet objects under s3://{self.bucket_name}/{prefix}")
+
+        frames = []
+        for key in keys:
+            obj = self._s3.get_object(Bucket=self.bucket_name, Key=key)
+            frames.append(gpd.read_parquet(io.BytesIO(obj["Body"].read())))
+        gdf = gpd.GeoDataFrame(pd.concat(frames, ignore_index=True))
+        if frames[0].crs is not None:
+            gdf = gdf.set_crs(frames[0].crs, allow_override=True)
+        context.log.info(
+            f"read_gpq_prefix: {len(gdf)} rows from {len(keys)} objects under {prefix}"
+        )
+        return gdf
+
+    def write_html(self, context, html: str) -> None:
+        """Upload an HTML document for this asset to ``{layer}/{asset}.html``."""
+        asset_key = context.asset_key
+        asset_name = asset_key.path[-1]
+        layer = context.assets_def.metadata_by_key[asset_key].get("layer", "unknown_layer")
+        s3_key = f"{layer}/{asset_name}.html"
+        s3_path = self._base_path / s3_key
+
+        body = html.encode("utf-8")
+        self._s3.put_object(
+            Bucket=self.bucket_name,
+            Key=s3_key,
+            Body=body,
+            ContentType="text/html",
+        )
+        context.log.info(f"Uploaded HTML to {s3_path}")
+        context.add_output_metadata(
+            {
+                "s3_write_location": dg.MetadataValue.text(str(s3_path)),
+                "s3_key": dg.MetadataValue.text(s3_key),
+                "file_size": dg.MetadataValue.text(format_size(len(body))),
+                "preview": dg.MetadataValue.md(
+                    f"[{asset_name}.html](s3://{self.bucket_name}/{s3_key})"
+                ),
+            }
+        )
 
 
 @dg.definitions
