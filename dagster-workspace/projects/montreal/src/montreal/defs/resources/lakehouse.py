@@ -1,10 +1,4 @@
 """S3-backed lakehouse resource for GeoDataFrames.
-
-`s3_datastore` writes a `geopandas.GeoDataFrame` to
-``s3://<bucket>/<layer>/<asset>.parquet`` (with a partition suffix when the
-asset is partitioned) and reads it back. The boto3 client and base path are
-created once per execution in `setup_for_execution` and held as private
-attributes so the resource itself stays an immutable Pydantic model.
 """
 
 import io
@@ -59,7 +53,8 @@ class s3_datastore(dg.ConfigurableResource):
 
         if context.has_partition_key:
             return f"{layer}/{asset_name}.parquet/{context.partition_key}.parquet"
-        return f"{layer}/{asset_name}.parquet"
+        else: 
+            return f"{layer}/{asset_name}.parquet"
 
     def gpq_preview(self, gdf: gpd.GeoDataFrame, n: int = 5) -> str:
         """Markdown preview of the GeoDataFrame, dropping the geometry column."""
@@ -75,6 +70,23 @@ class s3_datastore(dg.ConfigurableResource):
     def write_gpq(self, context, gdf: gpd.GeoDataFrame) -> None:
         """Write a GeoDataFrame to S3 in Parquet format."""
         if gdf is None or gdf.empty:
+            context.log.info("No data for this partition. Skipping write.")
+            return
+
+        if context.has_partition_key:
+            asset_key = context.asset_key
+            metadata = context.assets_def.metadata_by_key[asset_key]
+            partition_column = metadata.get("segmentation")
+
+            if not partition_column or partition_column not in gdf.columns:
+                raise ValueError(
+                    "Partitioned assets must set metadata['segmentation'] to "
+                    "the GeoDataFrame column used for partitioning."
+                )
+
+            gdf = gdf[gdf[partition_column] == context.partition_key]
+
+        if gdf.empty:
             context.log.info("No data for this partition. Skipping write.")
             return
 
