@@ -17,7 +17,7 @@ yearly_partitions = dg.TimeWindowPartitionsDefinition(
 
 # ----- ASSETS -----
 @dg.asset(
-    group_name="raw_data",
+    group_name="texas_raw_data",
     partitions_def=yearly_partitions,
     metadata={
         "layer": "landing", "source": "txdot", "data_category": "vector", "segmentation": "partitions", },
@@ -45,7 +45,7 @@ def texas_trunk_system(context: dg.AssetExecutionContext, feature_server: ArcGIS
 
 
 @dg.asset(
-    group_name='raw_data',
+    group_name='texas_raw_data',
     metadata={"layer": "landing", "source": "txdot", "data_category": "vector", "segmentation": "full_snapshots"},
 )
 def texas_county_boundaries(context: dg.AssetExecutionContext, feature_server: ArcGISFeatureServerResource, s3_datastore: S3DataStore) -> dg.MaterializeResult:
@@ -68,7 +68,7 @@ def texas_county_boundaries(context: dg.AssetExecutionContext, feature_server: A
     return gdf
 
 @dg.asset(
-    group_name='raw_data',
+    group_name='texas_raw_data',
     metadata={"layer": "landing", "source": "census_bureau", "data_category": "vector", "segmentation": "full_snapshots"},
 )
 def tx_med_household_income(context: dg.AssetExecutionContext, feature_server: ArcGISFeatureServerResource, s3_datastore: S3DataStore) -> dg.MaterializeResult:
