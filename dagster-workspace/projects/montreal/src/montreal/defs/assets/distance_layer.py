@@ -11,14 +11,14 @@ from montreal.defs.assets.h3_layer import (
     h3_montreal_osm_pois,
     h3_montreal_parks,
     h3_montreal_transit_stops,
-    r7_partitions,
+    r6_partitions,
 )
 from montreal.defs.resources.lakehouse import s3_datastore
 
 
 _AMENITY_CATEGORIES = ("grocery", "school", "health", "transit", "park", "bike")
 _SILVER_META = {"layer": "silver","data_category": "geospacial"}
-_SILVER_PARTITIONED_META = {**_SILVER_META, "segmentation": "h3_r7"}
+_SILVER_PARTITIONED_META = {**_SILVER_META, "segmentation": "h3_r6"}
 _EARTH_RADIUS_METRES = 6371000.0
 
 
@@ -181,7 +181,7 @@ def amenity_points(context: dg.AssetExecutionContext, s3_datastore: s3_datastore
 @dg.asset(
     group_name="distance_layer",
     metadata=_SILVER_PARTITIONED_META,
-    partitions_def=r7_partitions,
+    partitions_def=r6_partitions,
     deps=[h3_montreal_addresses, amenity_points],
 )
 def distances_to_amenities(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:

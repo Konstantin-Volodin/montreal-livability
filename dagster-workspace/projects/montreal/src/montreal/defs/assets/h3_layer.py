@@ -12,8 +12,8 @@ from montreal.defs.assets.raw import (
 )
 from montreal.defs.resources.lakehouse import s3_datastore
 
-# dynamic r7 partitions for the address layer
-r7_partitions = dg.DynamicPartitionsDefinition(name="address_r7")
+# dynamic r6 partitions for the address layer
+r6_partitions = dg.DynamicPartitionsDefinition(name="address_r6")
 
 
 def _to_wgs84(gdf):
@@ -53,24 +53,24 @@ _POI_CATEGORIES = {
 
 @dg.asset(group_name="h3_indexed_data", metadata=_SILVER_META, deps=[montreal_addresses])
 def h3_montreal_addresses(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
-    """H3-index addresses, shard the output by r7, and reconcile r7 partitions."""
+    """H3-index addresses, shard the output by r6, and reconcile r6 partitions."""
     gdf = _to_wgs84(s3_datastore.read_gpq(context, "bronze/montreal_addresses.parquet"))
     gdf = _h3_index(gdf)
-    gdf["h3_r7"] = gdf["h3_r10"].map(lambda cell: str(h3.cell_to_parent(cell, 7)))
-    gdf = gdf[gdf["h3_r7"].notna()]
-    context.log.info(f"montreal_addresses: {len(gdf)} rows H3-indexed (r10 + r7)")
+    gdf["h3_r6"] = gdf["h3_r10"].map(lambda cell: str(h3.cell_to_parent(cell, 6)))
+    gdf = gdf[gdf["h3_r6"].notna()]
+    context.log.info(f"montreal_addresses: {len(gdf)} rows H3-indexed (r10 + r6)")
 
-    desired = set(gdf["h3_r7"].unique())
-    existing = set(context.instance.get_dynamic_partitions(r7_partitions.name))
-    context.instance.add_dynamic_partitions(r7_partitions.name, sorted(desired - existing))
+    desired = set(gdf["h3_r6"].unique())
+    existing = set(context.instance.get_dynamic_partitions(r6_partitions.name))
+    context.instance.add_dynamic_partitions(r6_partitions.name, sorted(desired - existing))
     for stale in sorted(existing - desired):
-        context.instance.delete_dynamic_partition(r7_partitions.name, stale)
+        context.instance.delete_dynamic_partition(r6_partitions.name, stale)
     context.log.info(
-        f"r7 partitions: {len(desired)} cells "
+        f"r6 partitions: {len(desired)} cells "
         f"(+{len(desired - existing)} / -{len(existing - desired)})"
     )
 
-    s3_datastore.write_gpq_partitioned(context, gdf, "h3_r7")
+    s3_datastore.write_gpq_partitioned(context, gdf, "h3_r6")
     return dg.MaterializeResult()
 
 
