@@ -133,6 +133,41 @@ class s3_datastore(dg.ConfigurableResource):
             context.log.error(f"Failed to upload file: {e}")
             raise
 
+    def write_gpq_partitioned(self, context, gdf: gpd.GeoDataFrame, column: str) -> None:
+        """Shard a GeoDataFrame into one Parquet object per distinct `column` value.
+
+        Lets a non-partitioned asset pre-shard its output the same way an
+        r7-partitioned downstream asset reads it
+        (``{layer}/{asset}.parquet/{value}.parquet``), so each partition reads
+        only its slice instead of the whole table.
+        """
+        if gdf is None or gdf.empty:
+            context.log.info("No data. Skipping partitioned write.")
+            return
+
+        asset_key = context.asset_key
+        asset_name = asset_key.path[-1]
+        layer = context.assets_def.metadata_by_key[asset_key].get("layer", "unknown_layer")
+
+        written = 0
+        for value, group in gdf.groupby(column, sort=False):
+            s3_key = f"{layer}/{asset_name}.parquet/{value}.parquet"
+            buffer = io.BytesIO()
+            group.to_parquet(buffer, engine="pyarrow", index=False, compression="snappy")
+            buffer.seek(0)
+            self._s3.upload_fileobj(buffer, self.bucket_name, s3_key)
+            written += 1
+
+        context.log.info(f"write_gpq_partitioned: {written} objects under {layer}/{asset_name}.parquet/ keyed by '{column}'")
+        context.add_output_metadata(
+            {
+                "partition_column": dg.MetadataValue.text(column),
+                "num_partitions": dg.MetadataValue.int(written),
+                "num_records": dg.MetadataValue.int(len(gdf)),
+                "columns": dg.MetadataValue.json(list(gdf.columns)),
+            }
+        )
+
     def read_gpq(self, context, key: str) -> gpd.GeoDataFrame:
         """Read a GeoDataFrame back from S3 by key."""
         s3_path = self._base_path / key
