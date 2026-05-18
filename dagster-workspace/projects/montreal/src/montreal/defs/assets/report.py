@@ -25,6 +25,14 @@ _AMENITY_LABELS = {
     "transit": "Transit",
     "bike": "Bike paths",
 }
+_LIVABILITY_WEIGHTS = {
+    "score_grocery": 0.20,
+    "score_transit": 0.20,
+    "score_park": 0.20,
+    "score_bike": 0.15,
+    "score_school": 0.15,
+    "score_health": 0.10,
+}
 
 # Markup lives in templates/report.html; this module only prepares the data
 # that fills it. Autoescaping handles all the escaping the raw f-strings used
@@ -92,6 +100,7 @@ def _map_interaction_assets(
 ) -> str:
     """Bridge the outer report controls into the Folium iframe."""
     boundary_json = json.dumps(boundary_features, separators=(",", ":"))
+    weights_json = json.dumps(_LIVABILITY_WEIGHTS, separators=(",", ":"))
     return f"""
 <script>
 (function () {{
@@ -99,6 +108,8 @@ def _map_interaction_assets(
   var hexLayer = {hex_layer_name};
   var boundaryGroup = {boundary_group_name};
   var boundaryFeatures = {boundary_json};
+  var metricWeights = {weights_json};
+  var allMetrics = Object.keys(metricWeights);
   var highlightStyle = {{
     fill: true,
     fillColor: "#0f766e",
@@ -148,16 +159,20 @@ def _map_interaction_assets(
   }}
 
   function scoreForFeature(feature) {{
+    if (activeMetrics.length === allMetrics.length) {{
+      return feature.properties.livability;
+    }}
     var total = 0;
-    var count = 0;
+    var weightTotal = 0;
     activeMetrics.forEach(function (metric) {{
       var score = Number(feature.properties[metric]);
-      if (!Number.isNaN(score)) {{
-        total += score;
-        count++;
+      var weight = Number(metricWeights[metric]);
+      if (!Number.isNaN(score) && weight > 0) {{
+        total += weight * score;
+        weightTotal += weight;
       }}
     }});
-    return count ? total / count : feature.properties.livability;
+    return weightTotal ? total / weightTotal : feature.properties.livability;
   }}
 
   function setMetrics(metrics) {{
