@@ -48,9 +48,9 @@ _SILVER_META = {
 }
 
 _POI_CATEGORIES = {
-    "grocery": {"supermarket", "convenience", "deli"},
+    "grocery": {"supermarket", "convenience", "greengrocer", "bakery", "butcher"},
     "school": {"school", "college", "university", "kindergarten"},
-    "health": {"clinic", "hospital", "pharmacy"},
+    "health": {"clinic", "hospital", "pharmacy", "doctors", "dentist"},
 }
 
 
@@ -104,16 +104,19 @@ def h3_montreal_bike_paths(context: dg.AssetExecutionContext, s3_datastore: s3_d
     return dg.MaterializeResult()
 
 
-@dg.asset(group_name="categorized_data", metadata=_SILVER_META, deps=[h3_montreal_osm_pois])
-def h3_montreal_osm_pois_categorized(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
+@dg.asset(group_name="h3_indexed_data", metadata=_SILVER_META, deps=[quebec_osm_pois])
+def h3_montreal_osm_pois(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """Filter OSM POIs to livability categories used by the distance layer."""
-    gdf = s3_datastore.read_gpq(context, "silver/h3_montreal_osm_pois.parquet")
+
+    # read data
+    gdf = s3_datastore.read_gpq(context, "bronze/quebec_osm_pois.parquet")
     if "fclass" not in gdf.columns:
         raise ValueError(
             "Expected Geofabrik POI class column 'fclass'. "
             f"Available columns: {list(gdf.columns)}"
         )
 
+    # categorize
     fclass_to_category = {
         fclass: category
         for category, fclasses in _POI_CATEGORIES.items()
@@ -122,15 +125,22 @@ def h3_montreal_osm_pois_categorized(context: dg.AssetExecutionContext, s3_datas
     categorized = gdf.copy()
     categorized["category"] = categorized["fclass"].map(fclass_to_category)
     categorized = categorized[categorized["category"].notna()].copy()
+    context.log.info(fclass_to_category)
 
     if "name" not in categorized.columns:
         categorized["name"] = None
 
-    categorized = categorized[["geometry", "h3_r7", "h3_r10", "name", "category"]]
+    # h3 indexing
+    h3_indexed = _to_wgs84(categorized)
+    h3_indexed = _h3_index(h3_indexed)
+    context.log.info("h3_montreal_osm_pois: added h3_r7 and h3_r10 columns for analysis")
+
+    final = h3_indexed[["geometry", "h3_r7", "h3_r10", "name", "category"]]
     context.log.info(
-        "h3_montreal_osm_pois_categorized: "
-        f"{len(categorized)} rows across "
-        f"{categorized['category'].nunique()} categories"
+        "h3_montreal_osm_pois: "
+        f"{len(final)} rows across "
+        f"{final['category'].nunique()} categories"
     )
-    s3_datastore.write_gpq(context, categorized)
+
+    s3_datastore.write_gpq(context, final)
     return dg.MaterializeResult()
