@@ -3,7 +3,4 @@ directory_type = "workspace"
 [workspace]
 
 [[workspace.projects]]
-path = "projects\\texas"
-
-[[workspace.projects]]
-path = "projects\\montreal"
+path = "projects/montreal"
