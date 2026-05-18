@@ -119,21 +119,6 @@ def _nearest_distances(addr_df, amenity_df, max_k=10, log=None) -> pd.DataFrame:
     return distances
 
 
-# (distance_m, score) knots; linearly interpolated between, 0 past the last.
-_SCORE_CURVE = ((250.0, 100.0), (750.0, 50.0), (1500.0, 20.0))
-def _distance_score(distances) -> np.ndarray:
-    """Piecewise-linear distance (m) -> 0-100 livability score.
-
-    100 within 250 m, decaying linearly through the _SCORE_CURVE knots,
-    then 0 beyond 1500 m or where the distance is missing.
-    """
-    knots_m, knot_scores = zip(*_SCORE_CURVE)
-    d = np.asarray(distances, dtype=float)
-    score = np.interp(d, knots_m, knot_scores)
-    score[(d > knots_m[-1]) | np.isnan(d)] = 0.0
-    return score
-
-
 def _points_with_lat_lng(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     points = gdf.geometry.representative_point()
     return gdf.assign(
@@ -212,33 +197,5 @@ def distances_to_amenities(context: dg.AssetExecutionContext, s3_datastore: s3_d
         out[column] = distance_df[column].to_numpy()
 
     context.log.info(f"distances_to_amenities: {len(out)} address rows with {len(distance_df.columns)} distance columns")
-    s3_datastore.write_gpq(context, out)
-    return dg.MaterializeResult()
-
-
-@dg.asset(
-    group_name="distance_layer",
-    metadata=_SILVER_PARTITIONED_META,
-    partitions_def=r7_partitions,
-    deps=[distances_to_amenities],
-)
-def amenity_scores(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
-    """Per-category 0-100 livability score from each address's nearest-amenity distance."""
-    distances = s3_datastore.read_gpq(context, f"silver/distances_to_amenities.parquet/{context.partition_key}.parquet")
-
-    out = distances.copy()
-    for category in _AMENITY_CATEGORIES:
-        dist_col = f"dist_{category}"
-        score_col = f"score_{category}"
-        scores = _distance_score(distances[dist_col].to_numpy())
-        out[score_col] = scores
-        resolved = int(np.count_nonzero(~np.isnan(scores)))
-        context.log.info(
-            f"  category '{category}': {resolved}/{len(out)} scored "
-            f"(mean {np.nanmean(scores):.1f})"
-            if resolved else f"  category '{category}': 0 addresses scored"
-        )
-
-    context.log.info(f"amenity_scores: {len(out)} address rows with {len(_AMENITY_CATEGORIES)} score columns")
     s3_datastore.write_gpq(context, out)
     return dg.MaterializeResult()
