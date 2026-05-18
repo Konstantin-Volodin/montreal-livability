@@ -23,10 +23,7 @@ from montreal.defs.resources.lakehouse import s3_datastore
 
 _GOLD_META = {"layer": "gold", "data_category": "geospacial"}
 
-# (distance_m, score) knots; linearly interpolated between, 0 past the last.
 _SCORE_CURVE = ((100.0, 100.0), (500.0, 50.0), (1000.0, 20.0))
-
-
 def _distance_score(distances) -> np.ndarray:
     """Piecewise-linear distance (m) -> 0-100 livability score.
 
@@ -48,38 +45,42 @@ def _distance_score(distances) -> np.ndarray:
 def amenity_scores(
     context: dg.AssetExecutionContext, s3_datastore: s3_datastore
 ) -> dg.MaterializeResult:
-    """Per-category 0-100 score per address, all r7 partitions in one gold table."""
-    distances = s3_datastore.read_gpq_prefix(
-        context, "silver/distances_to_amenities.parquet/"
+    """Per-category 0-100 score aggregated to H3 r10 cells, all r7 partitions in one gold table."""
+    distances = s3_datastore.read_gpq_prefix(context, "silver/distances_to_amenities.parquet/")
+
+    # Score each address, then collapse to one row per r10 cell
+    per_address = pd.DataFrame({"h3_r10": distances["h3_r10"].to_numpy()})
+    score_columns = []
+    for category in _AMENITY_CATEGORIES:
+        column = f"score_{category}"
+        per_address[column] = _distance_score(distances[f"dist_{category}"].to_numpy())
+        score_columns.append(column)
+
+    out = (
+        per_address.groupby("h3_r10")
+        .agg(n_addresses=("h3_r10", "size"), **{c: (c, "mean") for c in score_columns})
+        .reset_index()
     )
 
-    # Keep only what the gold layer needs: the analysis cell + the scores.
-    out = pd.DataFrame({"h3_r10": distances["h3_r10"].to_numpy()})
     for category in _AMENITY_CATEGORIES:
-        scores = _distance_score(distances[f"dist_{category}"].to_numpy())
-        out[f"score_{category}"] = scores
-        resolved = int(np.count_nonzero(scores > 0))
+        column = f"score_{category}"
+        resolved = int(np.count_nonzero(out[column].to_numpy() > 0))
         context.log.info(
-            f"  category '{category}': {resolved}/{len(out)} scored "
-            f"(mean {np.nanmean(scores):.1f})"
-            if resolved else f"  category '{category}': 0 addresses scored"
+            f"  category '{category}': {resolved}/{len(out)} cells scored "
+            f"(mean {out[column].mean():.1f})"
+            if resolved else f"  category '{category}': 0 cells scored"
         )
 
     context.log.info(
-        f"amenity_scores: {len(out)} addresses, {len(_AMENITY_CATEGORIES)} score columns"
+        f"amenity_scores: {len(out)} r10 cells from {len(per_address)} addresses, "
+        f"{len(_AMENITY_CATEGORIES)} score columns"
     )
     s3_datastore.write_gpq(context, out)
     return dg.MaterializeResult()
 
 
 class LivabilityWeights(dg.Config):
-    """Per-category weights for the blended livability score.
-
-    Defaults follow the README. Weights are normalised by their sum, so
-    zeroing a category (or re-weighting for the personalized recommender)
-    never deflates the 0-100 range.
-    """
-
+    """Per-category weights for the blended livability score."""
     grocery: float = 0.20
     transit: float = 0.20
     park: float = 0.20
@@ -126,15 +127,26 @@ def livability_score(
 
 
 def _r9_hexes(scores: pd.DataFrame, resolution: int) -> pd.DataFrame:
-    """Mean livability + category breakdown per aggregated H3 cell, with geometry."""
+    """Address-weighted livability + category breakdown per aggregated H3 cell."""
     df = scores.dropna(subset=["h3_r10"]).copy()
     df["h3_agg"] = df["h3_r10"].map(lambda cell: h3.cell_to_parent(cell, resolution))
 
+    # Rows are r10 cells; weight each by its address count so a sparse cell
+    # doesn't pull a dense neighbour's r9 mean around.
     value_cols = ["livability"] + [f"score_{c}" for c in _AMENITY_CATEGORIES]
-    agg = df.groupby("h3_agg").agg(
-        addresses=("h3_agg", "size"),
-        **{col: (col, "mean") for col in value_cols},
-    ).reset_index()
+
+    def _weighted(group):
+        w = group["n_addresses"].to_numpy(dtype=float)
+        out = {"addresses": int(w.sum())}
+        for col in value_cols:
+            out[col] = np.average(group[col].to_numpy(dtype=float), weights=w)
+        return pd.Series(out)
+
+    agg = (
+        df.groupby("h3_agg")
+        .apply(_weighted, include_groups=False)
+        .reset_index()
+    )
 
     # h3.cell_to_boundary -> ((lat, lng), ...); shapely wants (lng, lat).
     agg["geometry"] = agg["h3_agg"].map(
