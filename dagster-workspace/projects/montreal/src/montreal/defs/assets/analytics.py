@@ -1,15 +1,4 @@
-"""Gold layer + visualization.
-
-`livability_score` turns each address's nearest-amenity distances into
-per-category 0-100 scores aggregated to H3 r10 cells (tagged with the
-municipality each cell falls inside, via a point-in-polygon join against the
-official boundary polygons), then blends them into one weighted livability
-number — the weights are a Dagster `Config`, the knob the personalized
-recommender rematerializes. `livability_map` builds an HTML report — summary
-pills, a municipality ranking table, and an embedded H3 r9 Folium map with
-selectable amenity layers. The first is an unpartitioned gold table, the
-second a gold HTML artifact.
-"""
+"""Gold livability scores and HTML report."""
 
 import dagster as dg
 import geopandas as gpd
@@ -26,21 +15,15 @@ from montreal.defs.assets.distance_layer import (
 from montreal.defs.assets.h3_layer import montreal_municipalities
 from montreal.defs.resources.lakehouse import s3_datastore
 
-_GOLD_META = {"layer": "gold", "data_category": "geospacial"}
-
-# Cells whose centroid falls outside every official boundary (river, off-island
-# edges) get this sentinel; it is dropped from the municipal ranking.
 _UNKNOWN_MUNICIPALITY = "Inconnu"
+_GOLD_META = {"layer": "gold", "data_category": "geospacial"}
+_SCORE_CURVE = ((100.0, 100.0), (500.0, 50.0), (1000.0, 20.0))
+_SCORE_COLUMNS = [f"score_{c}" for c in _AMENITY_CATEGORIES]
 
 
 def _tag_municipalities(cells: pd.Series, boundaries: gpd.GeoDataFrame) -> pd.Series:
-    """Map each unique H3 r10 cell to the municipality its centroid sits in.
-
-    A point-in-polygon join of cell centroids against the 19 arrondissements +
-    15 villes liées. Cells matching no polygon fall back to ``Inconnu``.
-    """
     unique = pd.Index(cells.dropna().unique(), name="h3_r10")
-    latlng = np.array([h3.cell_to_latlng(c) for c in unique])  # (lat, lng)
+    latlng = np.array([h3.cell_to_latlng(c) for c in unique])
     cell_points = gpd.GeoDataFrame(
         {"h3_r10": unique},
         geometry=[Point(lng, lat) for lat, lng in latlng],
@@ -48,22 +31,12 @@ def _tag_municipalities(cells: pd.Series, boundaries: gpd.GeoDataFrame) -> pd.Se
     )
     joined = cell_points.sjoin(
         boundaries[["municipality", "geometry"]], how="left", predicate="within"
-    ).drop_duplicates("h3_r10")  # a centroid on a shared edge can match twice
-    mapping = (
-        joined.set_index("h3_r10")["municipality"].fillna(_UNKNOWN_MUNICIPALITY)
-    )
+    ).drop_duplicates("h3_r10")
+    mapping = joined.set_index("h3_r10")["municipality"].fillna(_UNKNOWN_MUNICIPALITY)
     return cells.map(mapping).fillna(_UNKNOWN_MUNICIPALITY)
 
 
-_SCORE_CURVE = ((100.0, 100.0), (500.0, 50.0), (1000.0, 20.0))
-
-
 def _distance_score(distances) -> np.ndarray:
-    """Piecewise-linear distance (m) -> 0-100 livability score.
-
-    100 within 100 m, decaying linearly through the _SCORE_CURVE knots,
-    then 0 beyond 1000 m or where the distance is missing.
-    """
     knots_m, knot_scores = zip(*_SCORE_CURVE)
     d = np.asarray(distances, dtype=float)
     score = np.interp(d, knots_m, knot_scores)
@@ -72,7 +45,6 @@ def _distance_score(distances) -> np.ndarray:
 
 
 class LivabilityWeights(dg.Config):
-    """Per-category weights for the blended livability score."""
     grocery: float = 0.20
     transit: float = 0.20
     park: float = 0.20
@@ -92,25 +64,25 @@ def livability_score(
     config: LivabilityWeights,
 ) -> dg.MaterializeResult:
     """Per-r10-cell amenity scores + the weighted livability blend (gold)."""
-    distances = s3_datastore.read_gpq_prefix(context, "silver/distances_to_amenities.parquet/")
+    distances = s3_datastore.read_gpq_prefix(
+        context, "silver/distances_to_amenities.parquet/"
+    )
     boundaries = s3_datastore.read_gpq(context, "silver/montreal_municipalities.parquet")
 
-    # Score each address, then collapse to one row per r10 cell
-    per_address = pd.DataFrame({"h3_r10": distances["h3_r10"].to_numpy()})
-    score_columns = []
-    for category in _AMENITY_CATEGORIES:
-        column = f"score_{category}"
-        per_address[column] = _distance_score(distances[f"dist_{category}"].to_numpy())
-        score_columns.append(column)
-
-    grouped = per_address.groupby("h3_r10")
+    per_address = pd.DataFrame(
+        {
+            "h3_r10": distances["h3_r10"].to_numpy(),
+            **{
+                f"score_{c}": _distance_score(distances[f"dist_{c}"].to_numpy())
+                for c in _AMENITY_CATEGORIES
+            },
+        }
+    )
     out = (
-        grouped.agg(n_addresses=("h3_r10", "size"), **{c: (c, "mean") for c in score_columns})
+        per_address.groupby("h3_r10")
+        .agg(n_addresses=("h3_r10", "size"), **{c: (c, "mean") for c in _SCORE_COLUMNS})
         .reset_index()
     )
-
-    # Tag each r10 cell with the municipality its centroid falls inside
-    # (point-in-polygon against the official 19 arrondissements + 15 suburbs).
     out["municipality"] = _tag_municipalities(out["h3_r10"], boundaries).to_numpy()
 
     for category in _AMENITY_CATEGORIES:
@@ -122,16 +94,13 @@ def livability_score(
             if resolved else f"  category '{category}': 0 cells scored"
         )
 
-    # Blend the per-category scores into one weighted livability number.
     weights = {category: getattr(config, category) for category in _AMENITY_CATEGORIES}
     total = sum(weights.values())
     if total <= 0:
         raise ValueError(f"Livability weights must sum to > 0, got {weights}")
 
-    blended = np.zeros(len(out), dtype=float)
-    for category, weight in weights.items():
-        blended += weight * out[f"score_{category}"].to_numpy(dtype=float)
-    out["livability"] = blended / total
+    score_weights = pd.Series({f"score_{c}": w for c, w in weights.items()})
+    out["livability"] = out[_SCORE_COLUMNS].mul(score_weights).sum(axis=1) / total
 
     context.log.info(
         f"livability_score: {len(out)} r10 cells from {len(per_address)} addresses, "
@@ -153,41 +122,27 @@ def livability_score(
 
 
 def _address_weighted(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
-    """Group `df`, averaging livability + per-category scores weighted by the
-    address count of each r10 row (so a sparse cell can't drag a dense
-    neighbour's mean around). Returns one row per group + an `addresses` sum.
-    """
-    value_cols = ["livability"] + [f"score_{c}" for c in _AMENITY_CATEGORIES]
+    value_cols = ["livability", *_SCORE_COLUMNS]
+    weighted = df[[group_col, "n_addresses", *value_cols]].copy()
+    weighted[value_cols] = weighted[value_cols].mul(weighted["n_addresses"], axis=0)
 
-    def _agg(group: pd.DataFrame) -> pd.Series:
-        w = group["n_addresses"].to_numpy(dtype=float)
-        return pd.Series({
-            "addresses": int(w.sum()),
-            **{c: np.average(group[c].to_numpy(dtype=float), weights=w) for c in value_cols},
-        })
-
-    return df.groupby(group_col).apply(_agg, include_groups=False).reset_index()
+    out = weighted.groupby(group_col, as_index=False).sum(numeric_only=True)
+    out[value_cols] = out[value_cols].div(out["n_addresses"], axis=0)
+    return out.rename(columns={"n_addresses": "addresses"})
 
 
 def _dominant_municipality(s: pd.Series) -> str:
-    """Modal municipality of a group; ``Inconnu`` when the group is empty."""
     m = s.mode(dropna=True)
     return m.iloc[0] if not m.empty else _UNKNOWN_MUNICIPALITY
 
 
 def _agg_hexes(scores: pd.DataFrame, resolution: int) -> pd.DataFrame:
-    """Address-weighted livability per aggregated H3 cell, with cell polygons.
-
-    Each aggregated cell also carries its dominant (modal) municipality so the
-    map tooltip can name the area the hexagon sits in.
-    """
     df = scores.dropna(subset=["h3_r10"]).copy()
     df["h3_agg"] = df["h3_r10"].map(lambda cell: h3.cell_to_parent(cell, resolution))
     agg = _address_weighted(df, "h3_agg")
     agg["municipality"] = agg["h3_agg"].map(
         df.groupby("h3_agg")["municipality"].agg(_dominant_municipality)
     )
-    # h3.cell_to_boundary -> ((lat, lng), ...); shapely wants (lng, lat).
     agg["geometry"] = agg["h3_agg"].map(
         lambda cell: Polygon([(lng, lat) for lat, lng in h3.cell_to_boundary(cell)])
     )
@@ -195,12 +150,6 @@ def _agg_hexes(scores: pd.DataFrame, resolution: int) -> pd.DataFrame:
 
 
 def _municipality_table(scores: pd.DataFrame) -> pd.DataFrame:
-    """Address-weighted livability per municipality, best first.
-
-    All 19 arrondissements and 15 villes liées are ranked together (each is
-    comparable in scale); cells tagged ``Inconnu`` (centroid off every
-    boundary) are dropped from the ranking.
-    """
     df = scores.dropna(subset=["municipality"])
     df = df[df["municipality"] != _UNKNOWN_MUNICIPALITY]
     return (

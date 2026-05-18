@@ -19,7 +19,6 @@
   .section h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em;
     color:var(--muted); margin:0 0 12px; }
 
-  /* Pills: auto-fit grid so they stay tidy on every width. */
   .pills { display:grid; gap:10px;
     grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); }
   .pill { background:#fff; border:1px solid var(--line); border-radius:12px;
@@ -27,19 +26,13 @@
   .pill b { display:block; font-size:21px; font-weight:650; }
   .pill span { display:block; font-size:12px; color:var(--muted); margin-top:2px; }
 
-  /* Desktop: ranking table and map sit side by side so the report reads as
-     one page; below 960px they stack and the page simply scrolls. */
   .grid { display:grid; gap:24px; margin-top:24px; align-items:start;
     grid-template-columns:minmax(0,1fr); }
   @media (min-width:960px) { .grid { grid-template-columns:minmax(0,1fr) minmax(0,1.15fr); } }
 
-  /* min-width:0 lets the scroll container actually clip its wide table
-     instead of stretching the page past the viewport on a phone. */
   .panel { min-width:0; }
   .panel h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em;
     color:var(--muted); margin:0 0 12px; }
-  /* Table box matches the map's height so the two panels line up; the table
-     fills that space by choosing as many rows/page as the viewport allows. */
   .table-box { display:flex; flex-direction:column; height:var(--panel-h);
     border:1px solid var(--line); border-radius:12px; background:#fff;
     overflow:hidden; }
@@ -91,6 +84,8 @@
       address is scored 0-100 on proximity to six amenity categories (grocery,
       transit, parks, bike network, schools, health), blended into a single
       weighted score and rolled up here by municipality and H3 grid cell.
+      Toggle amenities to rebuild the map score; hover or click a municipality
+      row to highlight it.
     </p>
 
     <div class="section">
@@ -142,7 +137,7 @@
       </div>
 
       <div class="panel">
-        <h2>Map — custom amenity score</h2>
+        <h2>Livability map</h2>
         <div class="map-tools" aria-label="Map layers">
           {% for metric in map_metrics %}
           <label>
@@ -192,38 +187,26 @@
       var frame = document.getElementById("livability-map");
       if (!frame || !frame.contentWindow) return;
 
-      try {
-        if (
-          message.type === "highlight-municipality" &&
-          typeof frame.contentWindow.highlightMunicipality === "function"
-        ) {
+      var direct = {
+        "highlight-municipality": function () {
           frame.contentWindow.highlightMunicipality(
             message.municipalityKey,
             { fit: Boolean(message.fit) }
           );
-          return;
-        }
-        if (
-          message.type === "clear-municipality-highlight" &&
-          typeof frame.contentWindow.clearMunicipalityHighlight === "function"
-        ) {
+        },
+        "clear-municipality-highlight": function () {
           frame.contentWindow.clearMunicipalityHighlight();
-          return;
-        }
-        if (
-          message.type === "set-map-metrics" &&
-          typeof frame.contentWindow.setMapMetrics === "function"
-        ) {
+        },
+        "set-map-metrics": function () {
           frame.contentWindow.setMapMetrics(message.metrics);
-          return;
-        }
-        if (
-          message.type === "set-boundary-visibility" &&
-          typeof frame.contentWindow.setMunicipalityBoundariesVisible === "function"
-        ) {
+        },
+        "set-boundary-visibility": function () {
           frame.contentWindow.setMunicipalityBoundariesVisible(message.visible);
-          return;
         }
+      }[message.type];
+
+      try {
+        if (direct) { direct(); return; }
       } catch (_error) {
         // Fall back to postMessage below when direct srcdoc access is blocked.
       }
@@ -243,6 +226,18 @@
       return !checkbox || checkbox.checked;
     }
 
+    function highlight(municipalityKey, fit) {
+      sendToMap({
+        type: "highlight-municipality",
+        municipalityKey: municipalityKey,
+        fit: Boolean(fit)
+      });
+    }
+
+    function clearHighlight() {
+      sendToMap({ type: "clear-municipality-highlight" });
+    }
+
     function syncMapState() {
       sendToMap({ type: "set-map-metrics", metrics: currentMetrics() });
       sendToMap({
@@ -250,11 +245,7 @@
         visible: boundariesVisible()
       });
       if (selectedMunicipalityKey) {
-        sendToMap({
-          type: "highlight-municipality",
-          municipalityKey: selectedMunicipalityKey,
-          fit: true
-        });
+        highlight(selectedMunicipalityKey, true);
       }
     }
 
@@ -277,44 +268,23 @@
     var boundaryToggle = document.getElementById("map-boundaries");
     if (boundaryToggle) {
       boundaryToggle.addEventListener("change", function () {
-        sendToMap({
-          type: "set-boundary-visibility",
-          visible: boundaryToggle.checked
-        });
+        sendToMap({ type: "set-boundary-visibility", visible: boundaryToggle.checked });
       });
     }
 
     rows.forEach(function (tr) {
+      var municipalityKey = tr.getAttribute("data-municipality-key");
       tr.addEventListener("mouseenter", function () {
-        sendToMap({
-          type: "highlight-municipality",
-          municipalityKey: tr.getAttribute("data-municipality-key")
-        });
+        highlight(municipalityKey);
       });
       tr.addEventListener("mouseleave", function () {
-        if (selectedMunicipalityKey) {
-          sendToMap({
-            type: "highlight-municipality",
-            municipalityKey: selectedMunicipalityKey
-          });
-        } else {
-          sendToMap({ type: "clear-municipality-highlight" });
-        }
+        selectedMunicipalityKey ? highlight(selectedMunicipalityKey) : clearHighlight();
       });
       tr.addEventListener("click", function () {
-        var municipalityKey = tr.getAttribute("data-municipality-key");
         selectedMunicipalityKey =
           selectedMunicipalityKey === municipalityKey ? null : municipalityKey;
         setActiveRow(selectedMunicipalityKey);
-        if (selectedMunicipalityKey) {
-          sendToMap({
-            type: "highlight-municipality",
-            municipalityKey: selectedMunicipalityKey,
-            fit: true
-          });
-        } else {
-          sendToMap({ type: "clear-municipality-highlight" });
-        }
+        selectedMunicipalityKey ? highlight(selectedMunicipalityKey, true) : clearHighlight();
       });
     });
 
@@ -344,17 +314,16 @@
 
     function render() {
       measurePageSize();
-      if (pages <= 1) {
-        rows.forEach(function (tr) { tr.hidden = false; });
-        pager.hidden = true;
-        return;
-      }
-
+      pager.hidden = pages <= 1;
       var start = page * pageSize;
       var end = start + pageSize;
       rows.forEach(function (tr, i) {
-        tr.hidden = i < start || i >= end;
+        tr.hidden = pages > 1 && (i < start || i >= end);
       });
+      if (pages <= 1) {
+        return;
+      }
+
       status.textContent =
         (start + 1) + "–" + Math.min(end, rows.length) +
         " of " + rows.length;
