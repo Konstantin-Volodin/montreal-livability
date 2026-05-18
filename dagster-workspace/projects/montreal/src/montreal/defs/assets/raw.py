@@ -66,15 +66,17 @@ def montreal_bike_paths(context: dg.AssetExecutionContext, s3_datastore: s3_data
     return _materialize_raw(context, s3_datastore, lambda: gpd.read_file(url))
 
 
+@dg.asset(group_name="raw_data", metadata=_BRONZE_META)
+def montreal_municipality_boundaries(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
+    """Fetches the official agglomeration boundary polygons from data.montreal.ca and writes them to S3."""
+    url = "https://donnees.montreal.ca/dataset/9797a946-9da8-41ec-8815-f6b276dec7e9/resource/e18bfd07-edc8-4ce8-8a5a-3b617662a794/download/limites-administratives-agglomeration.geojson"
+    return _materialize_raw(context, s3_datastore, lambda: gpd.read_file(url))
+
+
 _BRONZE_META.update({"source": "geofabrik.de"})
 @dg.asset(group_name="raw_data", metadata=_BRONZE_META)
 def quebec_osm_pois(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
-    """Downloads the full Quebec OSM point-of-interest layers from Geofabrik once and writes them to S3.
-
-    Geofabrik splits POIs across two layers: ``gis_osm_pois_free`` (point
-    features) and ``gis_osm_pois_a_free`` (areas mapped as polygons, e.g. a
-    school or hospital footprint)
-    """
+    """Downloads the full Quebec OSM point-of-interest layers from Geofabrik once and writes them to S3."""
     url = "https://download.geofabrik.de/north-america/canada/quebec-latest-free.gpkg.zip"
     layers = ["gis_osm_pois_free", "gis_osm_pois_a_free"]
     minx, miny, maxx, maxy = _MONTREAL_BBOX
