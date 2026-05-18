@@ -120,8 +120,6 @@ def _nearest_distances(addr_df, amenity_df, max_k=10, log=None) -> pd.DataFrame:
 
 
 # (distance_m, score) knots; linearly interpolated between, 0 past the last.
-
-
 _SCORE_CURVE = ((250.0, 100.0), (750.0, 50.0), (1500.0, 20.0))
 def _distance_score(distances) -> np.ndarray:
     """Piecewise-linear distance (m) -> 0-100 livability score.
