@@ -3,21 +3,23 @@ import geopandas as gpd
 import h3
 import numpy as np
 import pandas as pd
-from shapely.geometry import Point
 
 from montreal.defs.assets.h3_layer import (
-    _SILVER_META,
     _to_wgs84,
     h3_montreal_addresses,
     h3_montreal_bike_paths,
-    h3_montreal_osm_pois_categorized,
+    h3_montreal_osm_pois,
     h3_montreal_parks,
     h3_montreal_transit_stops,
+    r7_partitions,
 )
 from montreal.defs.resources.lakehouse import s3_datastore
 
 
 _AMENITY_CATEGORIES = ("grocery", "school", "health", "transit", "park", "bike")
+_SILVER_META = {"layer": "silver","data_category": "geospacial"}
+_SILVER_PARTITIONED_META = {**_SILVER_META, "segmentation": "h3_r7"}
+_EARTH_RADIUS_METRES = 6371000.0
 
 
 def _haversine_metres(lat1, lng1, lat2, lng2) -> np.ndarray:
@@ -33,31 +35,32 @@ def _haversine_metres(lat1, lng1, lat2, lng2) -> np.ndarray:
         np.sin(dlat / 2.0) ** 2
         + np.cos(lat1_rad) * np.cos(lat2_rad) * np.sin(dlng / 2.0) ** 2
     )
-    return 6371000.0 * 2.0 * np.arcsin(np.sqrt(a))
+    return _EARTH_RADIUS_METRES * 2.0 * np.arcsin(np.sqrt(a))
 
 
-def _nearest_distances(addr_df, amenity_df, rings=(2, 5, 10)) -> pd.DataFrame:
-    """Nearest amenity distance per address row and category using H3 ring search."""
+def _nearest_distances(addr_df, amenity_df, max_k=10, log=None) -> pd.DataFrame:
+    """Nearest amenity distance per address row and category using H3 ring search.
+
+    The algorithm, step by step:
+      1. Drop address rows missing an H3 cell or coordinates.
+      2. For each amenity category, index its points by the H3 r10 cell they fall in.
+      3. For each (category, address cell), step the H3 ring distance outward
+         k = 0, 1, 2, ... and stop at the first k whose ring holds amenity
+         points (giving up after max_k) -- those become the candidate set for
+         every address in that cell.
+      4. Haversine-distance every address to its candidates and keep the minimum.
+    """
+    def _info(msg): 
+        if log is not None: log.info(msg)
+
     dist_columns = [f"dist_{category}" for category in _AMENITY_CATEGORIES]
     distances = pd.DataFrame(index=addr_df.index, columns=dist_columns, dtype=float)
 
-    if addr_df.empty:
-        return distances
-
-    required_addr_cols = {"h3_r10", "lat", "lng"}
-    required_amenity_cols = {"category", "h3_r10", "lat", "lng"}
-    missing_addr = required_addr_cols - set(addr_df.columns)
-    missing_amenity = required_amenity_cols - set(amenity_df.columns)
-    if missing_addr:
-        raise ValueError(f"addr_df missing required columns: {sorted(missing_addr)}")
-    if missing_amenity:
-        raise ValueError(f"amenity_df missing required columns: {sorted(missing_amenity)}")
-
-    amenity_df = amenity_df.dropna(subset=["category", "h3_r10", "lat", "lng"])
+    # Step 1: only addresses with a cell + lat/lng can be matched.
     addr_work = addr_df.dropna(subset=["h3_r10", "lat", "lng"])
-    if amenity_df.empty or addr_work.empty:
-        return distances
+    _info(f"_nearest_distances: {len(addr_work)}/{len(addr_df)} addresses usable, {len(amenity_df)} amenity points")
 
+    # Step 2: bucket each category's points by the H3 r10 cell they sit in.
     points_by_category = {}
     for category in _AMENITY_CATEGORIES:
         category_df = amenity_df[amenity_df["category"] == category]
@@ -65,32 +68,35 @@ def _nearest_distances(addr_df, amenity_df, rings=(2, 5, 10)) -> pd.DataFrame:
             cell: group[["lat", "lng"]].to_numpy(dtype=float)
             for cell, group in category_df.groupby("h3_r10", sort=False)
         }
+        _info(f"  category '{category}': {len(category_df)} points across {len(points_by_category[category])} H3 cells")
 
     cells = addr_work["h3_r10"].to_numpy()
     coords = addr_work[["lat", "lng"]].to_numpy(dtype=float)
     unique_cells = pd.unique(addr_work["h3_r10"])
+    _info(f"  {len(unique_cells)} unique address cells to resolve per category")
 
     for category, points_by_cell in points_by_category.items():
-        candidate_cache = {}
-        for addr_cell in unique_cells:
-            candidates = []
-            for k in rings:
-                ring_cells = h3.grid_disk(addr_cell, int(k))
-                candidates = [
-                    points_by_cell[cell]
-                    for cell in ring_cells
-                    if cell in points_by_cell
-                ]
-                if candidates:
-                    break
-            candidate_cache[addr_cell] = (
-                np.vstack(candidates) if candidates else np.empty((0, 2), dtype=float)
-            )
 
+        # Step 3: step the ring distance out one k at a time, stopping at the first ring that holds an amenity cell.
+        candidate_cache = {}
+        no_candidate_cells = 0
+        for addr_cell in unique_cells:
+            found = []
+
+            # k ring search for the nearest amenity cell(s)
+            for k in range(max_k + 1):
+                grid_ring_cells = h3.grid_ring(addr_cell, k)
+                found = [points_by_cell[cell] for cell in grid_ring_cells if cell in points_by_cell]
+                if found: break
+
+            if not found: no_candidate_cells += 1
+            candidate_cache[addr_cell] = (np.vstack(found) if found else np.empty((0, 2), dtype=float))
+        _info(f"  category '{category}': {no_candidate_cells} cells found no amenity within k={max_k}")
+
+        # Step 4: vectorized haversine to candidates, keep the nearest.
         category_distances = np.full(len(addr_work), np.nan, dtype=float)
         for addr_cell, candidates in candidate_cache.items():
-            if len(candidates) == 0:
-                continue
+            if len(candidates) == 0: continue
 
             positions = np.flatnonzero(cells == addr_cell)
             addr_coords = coords[positions]
@@ -101,7 +107,13 @@ def _nearest_distances(addr_df, amenity_df, rings=(2, 5, 10)) -> pd.DataFrame:
                 candidates[None, :, 1],
             )
             category_distances[positions] = np.nanmin(candidate_distances, axis=1)
+        resolved = int(np.count_nonzero(~np.isnan(category_distances)))
 
+        _info(
+            f"  category '{category}': {resolved}/{len(addr_work)} addresses got "
+            f"a distance (median {np.nanmedian(category_distances):.0f} m)"
+            if resolved else f"  category '{category}': 0 addresses got a distance"
+        )
         distances.loc[addr_work.index, f"dist_{category}"] = category_distances
 
     return distances
@@ -115,86 +127,75 @@ def _points_with_lat_lng(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         lng=points.x.to_numpy(dtype=float),
     )
 
-
 def _amenity_frame(gdf: gpd.GeoDataFrame, category: str) -> gpd.GeoDataFrame:
     points = _points_with_lat_lng(gdf)
     points["category"] = category
-    return points[["category", "h3_r7", "h3_r10", "lat", "lng", "geometry"]]
+    return points[["category", "h3_r10", "lat", "lng", "geometry"]]
 
 
 @dg.asset(
     group_name="distance_layer",
     metadata=_SILVER_META,
     deps=[
-        h3_montreal_osm_pois_categorized,
+        h3_montreal_osm_pois,
         h3_montreal_transit_stops,
         h3_montreal_parks,
         h3_montreal_bike_paths,
     ],
 )
 def amenity_points(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
-    """Long table of amenity candidate points for nearest-distance search."""
-    osm_pois = s3_datastore.read_gpq(context, "silver/h3_montreal_osm_pois_categorized.parquet")
+    """amenity candidate points for nearest-distance search."""
+    # read data
+    osm_pois = s3_datastore.read_gpq(context, "silver/h3_montreal_osm_pois.parquet")
     transit = s3_datastore.read_gpq(context, "silver/h3_montreal_transit_stops.parquet")
     parks = s3_datastore.read_gpq(context, "silver/h3_montreal_parks.parquet")
     bike_paths = s3_datastore.read_gpq(context, "silver/h3_montreal_bike_paths.parquet")
 
+    # concat POIs
     frames = []
-    for category in ("grocery", "school", "health"):
-        frames.append(_amenity_frame(osm_pois[osm_pois["category"] == category].copy(), category))
-
+    frames.append(_amenity_frame(osm_pois[osm_pois["category"] == "grocery"].copy(), "grocery"))
+    frames.append(_amenity_frame(osm_pois[osm_pois["category"] == "school"].copy(), "school"))
+    frames.append(_amenity_frame(osm_pois[osm_pois["category"] == "health"].copy(), "health"))
     frames.append(_amenity_frame(transit, "transit"))
     frames.append(_amenity_frame(parks, "park"))
 
-    bike_points = bike_paths[["h3_r7", "h3_r10"]].drop_duplicates().copy()
-    lat_lng = bike_points["h3_r10"].map(h3.cell_to_latlng)
-    bike_points["lat"] = lat_lng.map(lambda coords: coords[0]).astype(float)
-    bike_points["lng"] = lat_lng.map(lambda coords: coords[1]).astype(float)
-    bike_points["geometry"] = [
-        Point(lng, lat) for lat, lng in zip(bike_points["lat"], bike_points["lng"])
-    ]
-    bike_points["category"] = "bike"
-    bike_points = gpd.GeoDataFrame(
-        bike_points[["category", "h3_r7", "h3_r10", "lat", "lng", "geometry"]],
-        geometry="geometry",
-        crs=4326,
-    )
-    frames.append(bike_points)
+    # for bike paths, we use the path centroids 
+    bike = bike_paths[["h3_r10"]].drop_duplicates().copy()
+    latlng = np.array(bike["h3_r10"].map(h3.cell_to_latlng).tolist())
+    bike = bike.set_geometry(gpd.points_from_xy(latlng[:, 1], latlng[:, 0]), crs=4326)
+    frames.append(_amenity_frame(bike, "bike"))
 
-    amenities = gpd.GeoDataFrame(
-        pd.concat(frames, ignore_index=True),
-        geometry="geometry",
-        crs=4326,
-    )
-    amenities = amenities.dropna(subset=["category", "h3_r7", "h3_r10", "lat", "lng"])
-    context.log.info(
-        f"amenity_points: {len(amenities)} rows across "
-        f"{amenities['category'].nunique()} categories"
-    )
+    # results
+    amenities = gpd.GeoDataFrame(pd.concat(frames, ignore_index=True), geometry="geometry", crs=4326,)
+    amenities = amenities.dropna(subset=["category", "h3_r10", "lat", "lng"])
+    context.log.info(f"amenity_points: {len(amenities)} rows")
+    for category in amenities["category"].unique():
+        count = (amenities["category"] == category).sum()
+        context.log.info(f"  {category}: {count} rows")
+    
+    # export
     s3_datastore.write_gpq(context, amenities)
     return dg.MaterializeResult()
 
 
 @dg.asset(
     group_name="distance_layer",
-    metadata=_SILVER_META,
+    metadata=_SILVER_PARTITIONED_META,
+    partitions_def=r7_partitions,
     deps=[h3_montreal_addresses, amenity_points],
 )
 def distances_to_amenities(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """Nearest amenity distance per Montreal address and livability category."""
-    addresses = _to_wgs84(s3_datastore.read_gpq(context, "silver/h3_montreal_addresses.parquet"))
+    addresses = _to_wgs84(s3_datastore.read_gpq(context, f"silver/h3_montreal_addresses.parquet/{context.partition_key}.parquet"))
     amenities = s3_datastore.read_gpq(context, "silver/amenity_points.parquet")
 
     address_points = _points_with_lat_lng(addresses)
-    distance_df = _nearest_distances(address_points, amenities)
+    distance_df = _nearest_distances(address_points, amenities, log=context.log)
 
     out = addresses.copy()
     for column in distance_df.columns:
         out[column] = distance_df[column].to_numpy()
 
-    context.log.info(
-        f"distances_to_amenities: {len(out)} address rows with "
-        f"{len(distance_df.columns)} distance columns"
-    )
+    context.log.info(f"distances_to_amenities: {len(out)} address rows with {len(distance_df.columns)} distance columns")
     s3_datastore.write_gpq(context, out)
     return dg.MaterializeResult()
