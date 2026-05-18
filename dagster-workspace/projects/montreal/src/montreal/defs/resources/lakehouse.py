@@ -56,6 +56,20 @@ class s3_datastore(dg.ConfigurableResource):
         else: 
             return f"{layer}/{asset_name}.parquet"
 
+    def exists(self, context) -> bool:
+        """Return True if this asset's object is already present in S3.
+
+        Used by the raw assets to skip re-downloading source data on a server
+        restart / re-materialization when the bucket already holds it.
+        """
+        key = self.generate_s3_key(context)
+        try:
+            self._s3.head_object(Bucket=self.bucket_name, Key=key)
+            context.log.info(f"Found existing object at s3://{self.bucket_name}/{key}")
+            return True
+        except self._s3.exceptions.ClientError:
+            return False
+
     def gpq_preview(self, gdf: gpd.GeoDataFrame, n: int = 5) -> str:
         """Markdown preview of the GeoDataFrame, dropping the geometry column."""
         preview_df = gdf.head(n).copy()
