@@ -1,7 +1,8 @@
 """Gold layer + visualization.
 
 `amenity_scores` turns each address's nearest-amenity distances into per-category
-0-100 scores (tagged with the dominant municipality); `livability_score`
+0-100 scores (tagged with the municipality each H3 cell falls inside, via a
+point-in-polygon join against the official boundary polygons); `livability_score`
 collapses those into one weighted livability number (weights are a Dagster
 `Config`, which is what the personalized-recommender extension reuses);
 `livability_map` builds an HTML report — summary pills, a municipality ranking
@@ -10,63 +11,48 @@ first two are unpartitioned gold tables, the last a gold HTML artifact.
 """
 
 import dagster as dg
+import geopandas as gpd
 import h3
 import numpy as np
 import pandas as pd
-from shapely.geometry import Polygon
+from shapely.geometry import Point, Polygon
 
 from montreal.defs.assets import report
 from montreal.defs.assets.distance_layer import (
     _AMENITY_CATEGORIES,
     distances_to_amenities,
 )
+from montreal.defs.assets.h3_layer import montreal_municipalities
 from montreal.defs.resources.lakehouse import s3_datastore
 
 _GOLD_META = {"layer": "gold", "data_category": "geospacial"}
 
-# donnees.montreal.ca `uniteevaluationfonciere` MUNICIPALITE code -> name.
-# Code 50 is all of Montréal proper; the rest are demerged on-island suburbs.
-_MUNICIPALITY_NAMES = {
-    "02": "Baie-D'Urfé",
-    "03": "Beaconsfield",
-    "04": "Côte-Saint-Luc",
-    "05": "Dollard-Des Ormeaux",
-    "06": "Dorval",
-    "07": "Hampstead",
-    "09": "L'Île-Dorval",
-    "10": "Kirkland",
-    "13": "Mont-Royal",
-    "14": "Montréal-Est",
-    "15": "Montréal-Ouest",
-    "20": "Pointe-Claire",
-    "22": "Senneville",
-    "23": "Sainte-Anne-de-Bellevue",
-    "29": "Westmount",
-    "50": "Montréal",
-}
+# Cells whose centroid falls outside every official boundary (river, off-island
+# edges) get this sentinel; it is dropped from the municipal ranking.
 _UNKNOWN_MUNICIPALITY = "Inconnu"
 
 
-def _municipality_column(df: pd.DataFrame) -> str:
-    """Resolve the MUNICIPALITE column case-insensitively, or fail loudly."""
-    for col in df.columns:
-        if col.strip().lower() == "municipalite":
-            return col
-    raise ValueError(
-        "Expected a 'MUNICIPALITE' column on the address/distance frame to "
-        f"derive municipalities. Available columns: {list(df.columns)}"
-    )
+def _tag_municipalities(cells: pd.Series, boundaries: gpd.GeoDataFrame) -> pd.Series:
+    """Map each unique H3 r10 cell to the municipality its centroid sits in.
 
-
-def _municipality_name(codes: pd.Series) -> pd.Series:
-    """Map raw MUNICIPALITE codes (e.g. 50, '2') to readable names."""
-    normalized = (
-        codes.astype("string")
-        .str.strip()
-        .str.split(".").str[0]  # tolerate floats like '50.0'
-        .str.zfill(2)
+    A point-in-polygon join of cell centroids against the 19 arrondissements +
+    15 villes liées. Cells matching no polygon fall back to ``Inconnu``.
+    """
+    unique = pd.Index(cells.dropna().unique(), name="h3_r10")
+    latlng = np.array([h3.cell_to_latlng(c) for c in unique])  # (lat, lng)
+    cell_points = gpd.GeoDataFrame(
+        {"h3_r10": unique},
+        geometry=[Point(lng, lat) for lat, lng in latlng],
+        crs=4326,
     )
-    return normalized.map(_MUNICIPALITY_NAMES).fillna(_UNKNOWN_MUNICIPALITY)
+    joined = cell_points.sjoin(
+        boundaries[["municipality", "geometry"]], how="left", predicate="within"
+    ).drop_duplicates("h3_r10")  # a centroid on a shared edge can match twice
+    mapping = (
+        joined.set_index("h3_r10")["municipality"].fillna(_UNKNOWN_MUNICIPALITY)
+    )
+    return cells.map(mapping).fillna(_UNKNOWN_MUNICIPALITY)
+
 
 _SCORE_CURVE = ((100.0, 100.0), (500.0, 50.0), (1000.0, 20.0))
 def _distance_score(distances) -> np.ndarray:
@@ -85,18 +71,17 @@ def _distance_score(distances) -> np.ndarray:
 @dg.asset(
     group_name="analytics",
     metadata=_GOLD_META,
-    deps=[distances_to_amenities],
+    deps=[distances_to_amenities, montreal_municipalities],
 )
 def amenity_scores(
     context: dg.AssetExecutionContext, s3_datastore: s3_datastore
 ) -> dg.MaterializeResult:
     """Per-category 0-100 score aggregated to H3 r10 cells, all r7 partitions in one gold table."""
     distances = s3_datastore.read_gpq_prefix(context, "silver/distances_to_amenities.parquet/")
+    boundaries = s3_datastore.read_gpq(context, "silver/montreal_municipalities.parquet")
 
     # Score each address, then collapse to one row per r10 cell
-    municipality_col = _municipality_column(distances)
     per_address = pd.DataFrame({"h3_r10": distances["h3_r10"].to_numpy()})
-    per_address["municipality"] = _municipality_name(distances[municipality_col]).to_numpy()
     score_columns = []
     for category in _AMENITY_CATEGORIES:
         column = f"score_{category}"
@@ -109,14 +94,9 @@ def amenity_scores(
         .reset_index()
     )
 
-    # One r10 cell can straddle a municipal boundary; tag it with the
-    # dominant (modal) municipality of the addresses it contains.
-    def _dominant(s: pd.Series) -> str:
-        m = s.mode(dropna=True)
-        return m.iloc[0] if not m.empty else _UNKNOWN_MUNICIPALITY
-
-    municipality_by_cell = grouped["municipality"].agg(_dominant)
-    out["municipality"] = out["h3_r10"].map(municipality_by_cell).to_numpy()
+    # Tag each r10 cell with the municipality its centroid falls inside
+    # (point-in-polygon against the official 19 arrondissements + 15 suburbs).
+    out["municipality"] = _tag_municipalities(out["h3_r10"], boundaries).to_numpy()
 
     for category in _AMENITY_CATEGORIES:
         column = f"score_{category}"
@@ -200,11 +180,24 @@ def _address_weighted(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
     return df.groupby(group_col).apply(_agg, include_groups=False).reset_index()
 
 
+def _dominant_municipality(s: pd.Series) -> str:
+    """Modal municipality of a group; ``Inconnu`` when the group is empty."""
+    m = s.mode(dropna=True)
+    return m.iloc[0] if not m.empty else _UNKNOWN_MUNICIPALITY
+
+
 def _agg_hexes(scores: pd.DataFrame, resolution: int) -> pd.DataFrame:
-    """Address-weighted livability per aggregated H3 cell, with cell polygons."""
+    """Address-weighted livability per aggregated H3 cell, with cell polygons.
+
+    Each aggregated cell also carries its dominant (modal) municipality so the
+    map tooltip can name the area the hexagon sits in.
+    """
     df = scores.dropna(subset=["h3_r10"]).copy()
     df["h3_agg"] = df["h3_r10"].map(lambda cell: h3.cell_to_parent(cell, resolution))
     agg = _address_weighted(df, "h3_agg")
+    agg["municipality"] = agg["h3_agg"].map(
+        df.groupby("h3_agg")["municipality"].agg(_dominant_municipality)
+    )
     # h3.cell_to_boundary -> ((lat, lng), ...); shapely wants (lng, lat).
     agg["geometry"] = agg["h3_agg"].map(
         lambda cell: Polygon([(lng, lat) for lat, lng in h3.cell_to_boundary(cell)])
@@ -213,8 +206,14 @@ def _agg_hexes(scores: pd.DataFrame, resolution: int) -> pd.DataFrame:
 
 
 def _municipality_table(scores: pd.DataFrame) -> pd.DataFrame:
-    """Address-weighted livability per municipality, best first."""
+    """Address-weighted livability per municipality, best first.
+
+    All 19 arrondissements and 15 villes liées are ranked together (each is
+    comparable in scale); cells tagged ``Inconnu`` (centroid off every
+    boundary) are dropped from the ranking.
+    """
     df = scores.dropna(subset=["municipality"])
+    df = df[df["municipality"] != _UNKNOWN_MUNICIPALITY]
     return (
         _address_weighted(df, "municipality")
         .sort_values("livability", ascending=False)
@@ -225,7 +224,7 @@ def _municipality_table(scores: pd.DataFrame) -> pd.DataFrame:
 @dg.asset(
     group_name="analytics",
     metadata=_GOLD_META,
-    deps=[livability_score],
+    deps=[livability_score, montreal_municipalities],
 )
 def livability_map(
     context: dg.AssetExecutionContext,
@@ -234,6 +233,7 @@ def livability_map(
     """HTML livability report: summary pills, municipality ranking, embedded map (gold)."""
     scores = s3_datastore.read_gpq(context, "gold/livability_score.parquet")
     amenities = s3_datastore.read_gpq(context, "silver/amenity_points.parquet")
+    boundaries = s3_datastore.read_gpq(context, "silver/montreal_municipalities.parquet")
 
     hexes = _agg_hexes(scores, 8)
     table = _municipality_table(scores)
@@ -255,10 +255,10 @@ def livability_map(
         f"mean livability {stats['mean_livability']:.1f}"
     )
 
-    s3_datastore.write_html(context, report.renderreport(
+    s3_datastore.write_html(context, report.render_report(
         stats=stats,
         table=table,
-        map_html=report.build_map_html(hexes),
+        map_html=report.build_map_html(hexes, boundaries),
     ))
     return dg.MaterializeResult(
         metadata={

@@ -13,7 +13,16 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from montreal.defs.assets.distance_layer import _AMENITY_CATEGORIES
 
-TOP_N = 10
+# Human-readable pill labels for the Amenities section; falls back to a
+# capitalised category name for anything not listed here.
+_AMENITY_LABELS = {
+    "grocery": "Grocery stores",
+    "school": "Schools",
+    "health": "Health",
+    "park": "Parks",
+    "transit": "Transit",
+    "bike": "Bike paths",
+}
 
 # Markup lives in templates/report.html; this module only prepares the data
 # that fills it. Autoescaping handles all the escaping the raw f-strings used
@@ -34,8 +43,9 @@ _COLORMAP = cm.LinearColormap(
     caption="Score (0–100)",
 )
 
-def build_map_html(hexes: pd.DataFrame) -> str:
-    """Folium map with one selectable choropleth layer per metric."""
+def build_map_html(hexes: pd.DataFrame, boundaries: pd.DataFrame) -> str:
+    """Folium map with one selectable choropleth layer per metric, plus a
+    municipality-boundary overlay drawn on top."""
     centroids = hexes["geometry"].map(lambda poly: poly.centroid)
     fmap = folium.Map(
         location=[centroids.map(lambda p: p.y).mean(),
@@ -61,10 +71,23 @@ def build_map_html(hexes: pd.DataFrame) -> str:
                     "weight": 0, "fillOpacity": 0.6,
                 },
                 tooltip=(f"<b>{label}: {value:.0f}</b>"
+                         f"<br>{row.municipality}"
                          f"<br>{row.addresses} addresses"
                          f"<br>Livability: {row.livability:.0f}{breakdown}"),
             ).add_to(group)
         group.add_to(fmap)
+
+    # Added last so the outlines sit above whichever choropleth is active.
+    bounds = folium.FeatureGroup(name="Municipality boundaries", show=True)
+    for row in boundaries.itertuples(index=False):
+        folium.GeoJson(
+            row.geometry.__geo_interface__,
+            style_function=lambda _f: {
+                "fill": False, "color": "#1f2933", "weight": 1.5,
+            },
+            tooltip=str(row.municipality),
+        ).add_to(bounds)
+    bounds.add_to(fmap)
 
     folium.LayerControl(collapsed=False).add_to(fmap)
     return fmap.get_root().render()
@@ -72,14 +95,13 @@ def build_map_html(hexes: pd.DataFrame) -> str:
 
 def render_report(*, stats: dict, table: pd.DataFrame, map_html: str) -> str:
     """Assemble the self-contained livability report page from raw numbers."""
-    pills = [
+    summary_pills = [
         ("Addresses scored", f"{stats['addresses']:,}"),
-        ("Amenities", f"{stats['amenities']:,}"),
-        ("Mean livability", f"{stats['mean_livability']:.1f}"),
         ("Municipalities", str(stats["municipalities"])),
+        ("Mean livability", f"{stats['mean_livability']:.1f}"),
     ]
-    pills += [
-        (f"{c.capitalize()} points", f"{stats['by_category'].get(c, 0):,}")
+    amenity_pills = [
+        (_AMENITY_LABELS.get(c, c.capitalize()), f"{stats['by_category'].get(c, 0):,}")
         for c in _AMENITY_CATEGORIES
     ]
 
@@ -94,13 +116,14 @@ def render_report(*, stats: dict, table: pd.DataFrame, map_html: str) -> str:
             "livability_bg": _COLORMAP(r.livability),
             "scores": [f"{getattr(r, f'score_{c}'):.0f}" for c in _AMENITY_CATEGORIES],
         }
-        for rank, r in enumerate(table.head(TOP_N).itertuples(index=False), 1)
+        for rank, r in enumerate(table.itertuples(index=False), 1)
     ]
 
     return _ENV.get_template("report.html").render(
-        pills=pills,
+        summary_pills=summary_pills,
+        amenity_pills=amenity_pills,
         columns=columns,
         rows=rows,
-        top_n=min(TOP_N, len(table)),
+        municipality_count=len(rows),
         map_html=map_html,
     )
