@@ -6,6 +6,7 @@ import h3pandas
 from montreal.defs.assets.raw import (
     montreal_addresses,
     montreal_bike_paths,
+    montreal_municipality_boundaries,
     montreal_parks,
     montreal_transit_stops,
     quebec_osm_pois,
@@ -71,6 +72,22 @@ def h3_montreal_addresses(context: dg.AssetExecutionContext, s3_datastore: s3_da
     )
 
     s3_datastore.write_gpq_partitioned(context, gdf, "h3_r6")
+    return dg.MaterializeResult()
+
+
+@dg.asset(group_name="reference_data", metadata=_SILVER_META, deps=[montreal_municipality_boundaries])
+def montreal_municipalities(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
+    """Normalize the official boundary polygons to ``[municipality, type, geometry]`` (WGS84)."""
+    gdf = _to_wgs84(s3_datastore.read_gpq(context, "bronze/montreal_municipality_boundaries.parquet"))
+    for col in ("NOM", "TYPE"):
+        if col not in gdf.columns:
+            raise ValueError(
+                f"Expected column {col!r} on the boundary file. "
+                f"Available columns: {list(gdf.columns)}"
+            )
+    out = gdf.rename(columns={"NOM": "municipality", "TYPE": "type"})[["municipality", "type", "geometry"]]
+    context.log.info(f"montreal_municipalities: {len(out)} boundaries ({out['type'].value_counts().to_dict()})")
+    s3_datastore.write_gpq(context, out)
     return dg.MaterializeResult()
 
 
