@@ -53,7 +53,7 @@ Folium choropleth: aggregate scores to `h3_r9` cells, color by mean livability, 
 ## 4. Future Extensions
 - personalized recommender
 - rent overlay
-- asset checks + monitoring
+- asset checks + monitoring + tests
 - freshness policy + automation schedule (e.g., update monthly or when data sources refresh)
 
 ### Personalized Recommender
