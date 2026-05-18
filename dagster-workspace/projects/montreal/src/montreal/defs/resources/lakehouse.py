@@ -169,14 +169,29 @@ class s3_datastore(dg.ConfigurableResource):
             }
         )
 
-    def read_gpq(self, context, key: str) -> gpd.GeoDataFrame:
-        """Read a GeoDataFrame back from S3 by key."""
+    @staticmethod
+    def _read_parquet_bytes(raw: bytes):
+        """Parse parquet bytes, tolerating tables with no geometry column.
+
+        Gold tabular assets keep only score columns (no geometry), and
+        ``gpd.read_parquet`` rejects parquet without geo metadata -- fall
+        back to a plain ``pandas`` frame in that case.
+        """
+        buffer = io.BytesIO(raw)
+        try:
+            return gpd.read_parquet(buffer)
+        except (ValueError, AttributeError):
+            buffer.seek(0)
+            return pd.read_parquet(buffer)
+
+    def read_gpq(self, context, key: str):
+        """Read a (Geo)DataFrame back from S3 by key."""
         s3_path = self._base_path / key
         try:
             obj = self._s3.get_object(Bucket=self.bucket_name, Key=key)
-            gdf = gpd.read_parquet(io.BytesIO(obj["Body"].read()))
+            df = self._read_parquet_bytes(obj["Body"].read())
             context.log.info(f"Successfully read data from {s3_path}")
-            return gdf
+            return df
         except Exception as e:
             context.log.error(f"Failed to read file from S3: {e}")
             raise
@@ -201,10 +216,15 @@ class s3_datastore(dg.ConfigurableResource):
         frames = []
         for key in keys:
             obj = self._s3.get_object(Bucket=self.bucket_name, Key=key)
-            frames.append(gpd.read_parquet(io.BytesIO(obj["Body"].read())))
-        gdf = gpd.GeoDataFrame(pd.concat(frames, ignore_index=True))
-        if frames[0].crs is not None:
-            gdf = gdf.set_crs(frames[0].crs, allow_override=True)
+            frames.append(self._read_parquet_bytes(obj["Body"].read()))
+
+        combined = pd.concat(frames, ignore_index=True)
+        if isinstance(frames[0], gpd.GeoDataFrame):
+            gdf = gpd.GeoDataFrame(combined)
+            if frames[0].crs is not None:
+                gdf = gdf.set_crs(frames[0].crs, allow_override=True)
+        else:
+            gdf = combined
         context.log.info(
             f"read_gpq_prefix: {len(gdf)} rows from {len(keys)} objects under {prefix}"
         )
