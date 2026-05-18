@@ -1,13 +1,14 @@
 """Gold layer + visualization.
 
-`amenity_scores` turns each address's nearest-amenity distances into per-category
-0-100 scores (tagged with the municipality each H3 cell falls inside, via a
-point-in-polygon join against the official boundary polygons); `livability_score`
-collapses those into one weighted livability number (weights are a Dagster
-`Config`, which is what the personalized-recommender extension reuses);
-`livability_map` builds an HTML report — summary pills, a municipality ranking
-table, and an embedded H3 r8 Folium map with selectable amenity layers. The
-first two are unpartitioned gold tables, the last a gold HTML artifact.
+`livability_score` turns each address's nearest-amenity distances into
+per-category 0-100 scores aggregated to H3 r10 cells (tagged with the
+municipality each cell falls inside, via a point-in-polygon join against the
+official boundary polygons), then blends them into one weighted livability
+number — the weights are a Dagster `Config`, the knob the personalized
+recommender rematerializes. `livability_map` builds an HTML report — summary
+pills, a municipality ranking table, and an embedded H3 r9 Folium map with
+selectable amenity layers. The first is an unpartitioned gold table, the
+second a gold HTML artifact.
 """
 
 import dagster as dg
@@ -55,6 +56,8 @@ def _tag_municipalities(cells: pd.Series, boundaries: gpd.GeoDataFrame) -> pd.Se
 
 
 _SCORE_CURVE = ((100.0, 100.0), (500.0, 50.0), (1000.0, 20.0))
+
+
 def _distance_score(distances) -> np.ndarray:
     """Piecewise-linear distance (m) -> 0-100 livability score.
 
@@ -68,15 +71,27 @@ def _distance_score(distances) -> np.ndarray:
     return score
 
 
+class LivabilityWeights(dg.Config):
+    """Per-category weights for the blended livability score."""
+    grocery: float = 0.20
+    transit: float = 0.20
+    park: float = 0.20
+    bike: float = 0.15
+    school: float = 0.15
+    health: float = 0.10
+
+
 @dg.asset(
     group_name="analytics",
     metadata=_GOLD_META,
     deps=[distances_to_amenities, montreal_municipalities],
 )
-def amenity_scores(
-    context: dg.AssetExecutionContext, s3_datastore: s3_datastore
+def livability_score(
+    context: dg.AssetExecutionContext,
+    s3_datastore: s3_datastore,
+    config: LivabilityWeights,
 ) -> dg.MaterializeResult:
-    """Per-category 0-100 score aggregated to H3 r10 cells, all r7 partitions in one gold table."""
+    """Per-r10-cell amenity scores + the weighted livability blend (gold)."""
     distances = s3_datastore.read_gpq_prefix(context, "silver/distances_to_amenities.parquet/")
     boundaries = s3_datastore.read_gpq(context, "silver/montreal_municipalities.parquet")
 
@@ -107,58 +122,32 @@ def amenity_scores(
             if resolved else f"  category '{category}': 0 cells scored"
         )
 
-    context.log.info(
-        f"amenity_scores: {len(out)} r10 cells from {len(per_address)} addresses, "
-        f"{len(_AMENITY_CATEGORIES)} score columns, "
-        f"{out['municipality'].nunique()} municipalities"
-    )
-    s3_datastore.write_gpq(context, out)
-    return dg.MaterializeResult()
-
-
-class LivabilityWeights(dg.Config):
-    """Per-category weights for the blended livability score."""
-    grocery: float = 0.20
-    transit: float = 0.20
-    park: float = 0.20
-    bike: float = 0.15
-    school: float = 0.15
-    health: float = 0.10
-
-
-@dg.asset(
-    group_name="analytics",
-    metadata=_GOLD_META,
-    deps=[amenity_scores],
-)
-def livability_score(
-    context: dg.AssetExecutionContext,
-    s3_datastore: s3_datastore,
-    config: LivabilityWeights,
-) -> dg.MaterializeResult:
-    """Weighted 0-100 livability score per address (gold)."""
-    scores = s3_datastore.read_gpq(context, "gold/amenity_scores.parquet")
-
+    # Blend the per-category scores into one weighted livability number.
     weights = {category: getattr(config, category) for category in _AMENITY_CATEGORIES}
     total = sum(weights.values())
-    if total <= 0: raise ValueError(f"Livability weights must sum to > 0, got {weights}")
+    if total <= 0:
+        raise ValueError(f"Livability weights must sum to > 0, got {weights}")
 
-    blended = np.zeros(len(scores), dtype=float)
+    blended = np.zeros(len(out), dtype=float)
     for category, weight in weights.items():
-        blended += weight * scores[f"score_{category}"].to_numpy(dtype=float)
-    blended /= total
+        blended += weight * out[f"score_{category}"].to_numpy(dtype=float)
+    out["livability"] = blended / total
 
-    out = scores.copy()
-    out["livability"] = blended
     context.log.info(
-        f"livability_score: {len(out)} addresses, mean {np.nanmean(blended):.1f} (weights {weights}, sum {total:.2f})"
+        f"livability_score: {len(out)} r10 cells from {len(per_address)} addresses, "
+        f"{out['municipality'].nunique()} municipalities, "
+        f"mean livability {np.nanmean(out['livability']):.1f} "
+        f"(weights {weights}, sum {total:.2f})"
     )
 
     s3_datastore.write_gpq(context, out)
     return dg.MaterializeResult(
         metadata={
+            "num_cells": dg.MetadataValue.int(len(out)),
             "weights": dg.MetadataValue.json(weights),
-            "mean_livability": dg.MetadataValue.float(round(float(np.nanmean(blended)), 2)),
+            "mean_livability": dg.MetadataValue.float(
+                round(float(np.nanmean(out["livability"])), 2)
+            ),
         }
     )
 
@@ -235,7 +224,7 @@ def livability_map(
     amenities = s3_datastore.read_gpq(context, "silver/amenity_points.parquet")
     boundaries = s3_datastore.read_gpq(context, "silver/montreal_municipalities.parquet")
 
-    hexes = _agg_hexes(scores, 8)
+    hexes = _agg_hexes(scores, 9)
     table = _municipality_table(scores)
 
     weights = scores["n_addresses"].to_numpy(dtype=float)
@@ -250,16 +239,19 @@ def livability_map(
     }
 
     context.log.info(
-        f"livability_map: {len(hexes)} r8 cells, {stats['municipalities']} municipalities, "
+        f"livability_map: {len(hexes)} r9 cells, {stats['municipalities']} municipalities, "
         f"{stats['addresses']} addresses, {stats['amenities']} amenities, "
         f"mean livability {stats['mean_livability']:.1f}"
     )
 
-    s3_datastore.write_html(context, report.render_report(
-        stats=stats,
-        table=table,
-        map_html=report.build_map_html(hexes, boundaries),
-    ))
+    s3_datastore.write_html(
+        context,
+        report.render_report(
+            stats=stats,
+            table=table,
+            map_html=report.build_map_html(hexes, boundaries),
+        ),
+    )
     return dg.MaterializeResult(
         metadata={
             "num_addresses": dg.MetadataValue.int(stats["addresses"]),

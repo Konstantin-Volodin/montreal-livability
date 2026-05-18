@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Montréal Livability Report</title>
 <style>
-  :root { --ink:#1f2933; --muted:#647084; --line:#e3e8ef; --bg:#f7f9fc; }
+  :root { --ink:#1f2933; --muted:#647084; --line:#e3e8ef; --bg:#f7f9fc;
+    --panel-h:clamp(380px, 72vh, 660px); }
   * { box-sizing:border-box; }
   html, body { margin:0; }
   body { background:var(--bg); color:var(--ink);
@@ -28,13 +29,21 @@
 
   /* Desktop: ranking table and map sit side by side so the report reads as
      one page; below 960px they stack and the page simply scrolls. */
-  .grid { display:grid; gap:24px; margin-top:24px; align-items:start; }
+  .grid { display:grid; gap:24px; margin-top:24px; align-items:start;
+    grid-template-columns:minmax(0,1fr); }
   @media (min-width:960px) { .grid { grid-template-columns:minmax(0,1fr) minmax(0,1.15fr); } }
 
+  /* min-width:0 lets the scroll container actually clip its wide table
+     instead of stretching the page past the viewport on a phone. */
+  .panel { min-width:0; }
   .panel h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em;
     color:var(--muted); margin:0 0 12px; }
-  .table-scroll { overflow-x:auto; -webkit-overflow-scrolling:touch;
-    border:1px solid var(--line); border-radius:12px; background:#fff; }
+  /* Table box matches the map's height so the two panels line up; the table
+     fills that space by choosing as many rows/page as the viewport allows. */
+  .table-box { display:flex; flex-direction:column; height:var(--panel-h);
+    border:1px solid var(--line); border-radius:12px; background:#fff;
+    overflow:hidden; }
+  .table-scroll { flex:1; overflow:auto; -webkit-overflow-scrolling:touch; }
   table { width:100%; border-collapse:collapse; font-size:13px; }
   th, td { padding:9px 12px; text-align:right; border-bottom:1px solid var(--line);
     white-space:nowrap; }
@@ -44,11 +53,26 @@
     position:sticky; top:0; }
   tbody tr:nth-child(even) { background:#fbfcfe; }
   tbody tr:last-child td { border-bottom:0; }
+  tbody tr { cursor:pointer; transition:background-color .12s ease; }
+  tbody tr:hover, tbody tr.is-active { background:#eef7f1; }
   td.muni { font-weight:600; }
   td.liv { font-weight:700; }
 
-  .map { width:100%; height:clamp(380px, 72vh, 660px); border:1px solid var(--line);
+  .map { width:100%; height:var(--panel-h); border:1px solid var(--line);
     border-radius:12px; background:#fff; display:block; }
+  .map-tools { display:flex; flex-wrap:wrap; align-items:center; gap:8px 14px;
+    margin:0 0 10px; padding:8px 10px; border:1px solid var(--line);
+    border-radius:8px; background:#fff; font-size:12px; color:var(--ink); }
+  .map-tools label { display:flex; align-items:center; gap:4px; white-space:nowrap; }
+  .map-tools input { margin:0; }
+
+  .pager { display:flex; align-items:center; justify-content:space-between;
+    gap:12px; padding:8px 12px; border-top:1px solid var(--line);
+    background:#fbfcfe; font-size:12px; color:var(--muted); }
+  .pager button { font:inherit; color:var(--ink); background:#fff;
+    border:1px solid var(--line); border-radius:8px; padding:5px 12px;
+    cursor:pointer; }
+  .pager button:disabled { color:var(--muted); cursor:default; opacity:.55; }
 
   .foot { margin-top:32px; color:var(--muted); font-size:12px; line-height:1.5; }
 
@@ -90,41 +114,264 @@
     <div class="grid">
       <div class="panel">
         <h2>Municipality ranking by livability ({{ municipality_count }})</h2>
-        <div class="table-scroll">
-          <table>
-            <thead>
-              <tr>{% for c in columns %}<th>{{ c }}</th>{% endfor %}</tr>
-            </thead>
-            <tbody>
-              {% for row in rows %}
-              <tr>
-                <td>{{ row.rank }}</td>
-                <td class="muni">{{ row.municipality }}</td>
-                <td>{{ row.addresses }}</td>
-                <td class="liv" style="background:{{ row.livability_bg }}">{{ row.livability }}</td>
-                {% for score in row.scores %}<td>{{ score }}</td>{% endfor %}
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
+        <div class="table-box">
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>{% for c in columns %}<th>{{ c }}</th>{% endfor %}</tr>
+              </thead>
+              <tbody id="ranking-body">
+                {% for row in rows %}
+                <tr data-municipality-key="{{ row.municipality_key }}">
+                  <td>{{ row.rank }}</td>
+                  <td class="muni">{{ row.municipality }}</td>
+                  <td>{{ row.addresses }}</td>
+                  <td class="liv" style="background:{{ row.livability_bg }}">{{ row.livability }}</td>
+                  {% for score in row.scores %}<td>{{ score }}</td>{% endfor %}
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <div class="pager" id="ranking-pager" hidden>
+            <button type="button" id="ranking-prev">‹ Prev</button>
+            <span id="ranking-status"></span>
+            <button type="button" id="ranking-next">Next ›</button>
+          </div>
         </div>
       </div>
 
       <div class="panel">
-        <h2>Map — toggle the overall score or any single amenity layer</h2>
-        <iframe class="map" title="Livability map" srcdoc="{{ map_html }}"></iframe>
+        <h2>Map — custom amenity score</h2>
+        <div class="map-tools" aria-label="Map layers">
+          {% for metric in map_metrics %}
+          <label>
+            <input type="checkbox" name="map-metric" value="{{ metric.key }}" checked>
+            {{ metric.label }}
+          </label>
+          {% endfor %}
+          <label>
+            <input type="checkbox" id="map-boundaries" checked>
+            Municipality boundaries
+          </label>
+        </div>
+        <iframe class="map" id="livability-map" title="Livability map" srcdoc="{{ map_html }}"></iframe>
       </div>
     </div>
 
-    <p class="foot">
-      data sources:
-      - addresses: https://donnees.montreal.ca/dataset/unites-evaluation-fonciere
-      - amenities: https://download.geofabrik.de/north-america/canada/quebec.html
-      - parks: https://donnees.montreal.ca/dataset/grands-parcs-parcs-d-arrondissements-et-espaces-publics
-      - bike network: https://donnees.montreal.ca/dataset/pistes-cyclables
-      - transtit network: https://www.stm.info/sites/default/files/gtfs/gtfs_stm.zip
-      - municipality boundaries: https://donnees.montreal.ca/dataset/limites-administratives-agglomeration
-    </p>
+    <div class="foot">
+      <strong>data sources:</strong>
+      <ul>
+        <li>addresses: <a href="https://donnees.montreal.ca/dataset/unites-evaluation-fonciere">https://donnees.montreal.ca/dataset/unites-evaluation-fonciere</a></li>
+        <li>amenities: <a href="https://download.geofabrik.de/north-america/canada/quebec.html">https://download.geofabrik.de/north-america/canada/quebec.html</a></li>
+        <li>parks: <a href="https://donnees.montreal.ca/dataset/grands-parcs-parcs-d-arrondissements-et-espaces-publics">https://donnees.montreal.ca/dataset/grands-parcs-parcs-d-arrondissements-et-espaces-publics</a></li>
+        <li>bike network: <a href="https://donnees.montreal.ca/dataset/pistes-cyclables">https://donnees.montreal.ca/dataset/pistes-cyclables</a></li>
+        <li>transit network: <a href="https://www.stm.info/sites/default/files/gtfs/gtfs_stm.zip">https://www.stm.info/sites/default/files/gtfs/gtfs_stm.zip</a></li>
+        <li>municipality boundaries: <a href="https://donnees.montreal.ca/dataset/limites-administratives-agglomeration">https://donnees.montreal.ca/dataset/limites-administratives-agglomeration</a></li>
+      </ul>
+    </div>
   </div>
+<script>
+  (function () {
+    var MIN_PAGE_SIZE = 8;
+    var rows = Array.prototype.slice.call(
+      document.querySelectorAll("#ranking-body tr")
+    );
+    var pager = document.getElementById("ranking-pager");
+    var tableScroll = document.querySelector(".table-scroll");
+    var headerRow = document.querySelector("thead tr");
+    var prev = document.getElementById("ranking-prev");
+    var next = document.getElementById("ranking-next");
+    var status = document.getElementById("ranking-status");
+    var pageSize = rows.length;
+    var pages = 1;
+    var page = 0;
+    var selectedMunicipalityKey = null;
+
+    function sendToMap(message) {
+      var frame = document.getElementById("livability-map");
+      if (!frame || !frame.contentWindow) return;
+
+      try {
+        if (
+          message.type === "highlight-municipality" &&
+          typeof frame.contentWindow.highlightMunicipality === "function"
+        ) {
+          frame.contentWindow.highlightMunicipality(
+            message.municipalityKey,
+            { fit: Boolean(message.fit) }
+          );
+          return;
+        }
+        if (
+          message.type === "clear-municipality-highlight" &&
+          typeof frame.contentWindow.clearMunicipalityHighlight === "function"
+        ) {
+          frame.contentWindow.clearMunicipalityHighlight();
+          return;
+        }
+        if (
+          message.type === "set-map-metrics" &&
+          typeof frame.contentWindow.setMapMetrics === "function"
+        ) {
+          frame.contentWindow.setMapMetrics(message.metrics);
+          return;
+        }
+        if (
+          message.type === "set-boundary-visibility" &&
+          typeof frame.contentWindow.setMunicipalityBoundariesVisible === "function"
+        ) {
+          frame.contentWindow.setMunicipalityBoundariesVisible(message.visible);
+          return;
+        }
+      } catch (_error) {
+        // Fall back to postMessage below when direct srcdoc access is blocked.
+      }
+
+      frame.contentWindow.postMessage(message, "*");
+    }
+
+    function currentMetrics() {
+      return Array.prototype.map.call(
+        document.querySelectorAll('input[name="map-metric"]:checked'),
+        function (input) { return input.value; }
+      );
+    }
+
+    function boundariesVisible() {
+      var checkbox = document.getElementById("map-boundaries");
+      return !checkbox || checkbox.checked;
+    }
+
+    function syncMapState() {
+      sendToMap({ type: "set-map-metrics", metrics: currentMetrics() });
+      sendToMap({
+        type: "set-boundary-visibility",
+        visible: boundariesVisible()
+      });
+      if (selectedMunicipalityKey) {
+        sendToMap({
+          type: "highlight-municipality",
+          municipalityKey: selectedMunicipalityKey,
+          fit: true
+        });
+      }
+    }
+
+    function setActiveRow(municipalityKey) {
+      rows.forEach(function (tr) {
+        tr.classList.toggle(
+          "is-active",
+          Boolean(municipalityKey) &&
+            tr.getAttribute("data-municipality-key") === municipalityKey
+        );
+      });
+    }
+
+    document.querySelectorAll('input[name="map-metric"]').forEach(function (input) {
+      input.addEventListener("change", function () {
+        sendToMap({ type: "set-map-metrics", metrics: currentMetrics() });
+      });
+    });
+
+    var boundaryToggle = document.getElementById("map-boundaries");
+    if (boundaryToggle) {
+      boundaryToggle.addEventListener("change", function () {
+        sendToMap({
+          type: "set-boundary-visibility",
+          visible: boundaryToggle.checked
+        });
+      });
+    }
+
+    rows.forEach(function (tr) {
+      tr.addEventListener("mouseenter", function () {
+        sendToMap({
+          type: "highlight-municipality",
+          municipalityKey: tr.getAttribute("data-municipality-key")
+        });
+      });
+      tr.addEventListener("mouseleave", function () {
+        if (selectedMunicipalityKey) {
+          sendToMap({
+            type: "highlight-municipality",
+            municipalityKey: selectedMunicipalityKey
+          });
+        } else {
+          sendToMap({ type: "clear-municipality-highlight" });
+        }
+      });
+      tr.addEventListener("click", function () {
+        var municipalityKey = tr.getAttribute("data-municipality-key");
+        selectedMunicipalityKey =
+          selectedMunicipalityKey === municipalityKey ? null : municipalityKey;
+        setActiveRow(selectedMunicipalityKey);
+        if (selectedMunicipalityKey) {
+          sendToMap({
+            type: "highlight-municipality",
+            municipalityKey: selectedMunicipalityKey,
+            fit: true
+          });
+        } else {
+          sendToMap({ type: "clear-municipality-highlight" });
+        }
+      });
+    });
+
+    var mapFrame = document.getElementById("livability-map");
+    if (mapFrame) {
+      mapFrame.addEventListener("load", function () {
+        syncMapState();
+      });
+    }
+
+    function measurePageSize() {
+      rows.forEach(function (tr) { tr.hidden = false; });
+      pager.hidden = false;
+
+      var rowHeight = rows[0] ? rows[0].getBoundingClientRect().height : 36;
+      var headerHeight = headerRow ? headerRow.getBoundingClientRect().height : 0;
+      var usableHeight = tableScroll.clientHeight - headerHeight;
+      pageSize = Math.max(
+        MIN_PAGE_SIZE,
+        Math.floor(usableHeight / Math.max(rowHeight, 1))
+      );
+      pageSize = Math.min(Math.max(pageSize, 1), rows.length);
+      pages = Math.ceil(rows.length / pageSize);
+      if (pages <= 1) page = 0;
+      else page = Math.min(page, pages - 1);
+    }
+
+    function render() {
+      measurePageSize();
+      if (pages <= 1) {
+        rows.forEach(function (tr) { tr.hidden = false; });
+        pager.hidden = true;
+        return;
+      }
+
+      var start = page * pageSize;
+      var end = start + pageSize;
+      rows.forEach(function (tr, i) {
+        tr.hidden = i < start || i >= end;
+      });
+      status.textContent =
+        (start + 1) + "–" + Math.min(end, rows.length) +
+        " of " + rows.length;
+      prev.disabled = page === 0;
+      next.disabled = page === pages - 1;
+    }
+
+    prev.addEventListener("click", function () {
+      if (page > 0) { page--; render(); }
+    });
+    next.addEventListener("click", function () {
+      if (page < pages - 1) { page++; render(); }
+    });
+
+    render();
+    window.addEventListener("resize", render);
+  })();
+</script>
 </body>
 </html>
