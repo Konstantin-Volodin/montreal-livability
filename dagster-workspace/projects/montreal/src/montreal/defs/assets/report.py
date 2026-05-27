@@ -157,7 +157,7 @@ def build_map_html(hexes: pd.DataFrame, boundaries: pd.DataFrame) -> str:
         _key(feature["properties"]["municipality"]): feature
         for feature in boundary_collection["features"]
     }
-    map_script = ENV.get_template("map_interactions.html").render(
+    map_script = ENV.get_template("map.html").render(
         map_name=map_name,
         hex_layer_name=hex_layer_name,
         boundary_group_name=boundary_group_name,
