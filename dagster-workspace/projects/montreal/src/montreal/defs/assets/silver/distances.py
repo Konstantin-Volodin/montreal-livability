@@ -1,39 +1,63 @@
+"""Nearest amenity distance per Montreal address and livability category, sharded by r6."""
+
+from dataclasses import asdict
+
 import dagster as dg
-import geopandas as gpd
 import h3
 import numpy as np
 import pandas as pd
 
-from montreal.defs.assets.silver.h3 import (
-    h3_montreal_addresses,
-    h3_montreal_bike_paths,
-    h3_montreal_osm_pois,
-    h3_montreal_parks,
-    h3_montreal_transit_stops,
+from montreal.defs.assets.silver.h3 import h3_montreal_addresses
+from montreal.defs.assets.silver.amenities import amenities
+from montreal.defs.assets.silver.config import (
+    POI_CATEGORIES,
+    SilverAssetDataContract,
+    SilverAssetMetadata,
+    points_with_lat_lng,
     r6_partitions,
+)
+from montreal.defs.checks.factory import (
+    field_completeness_factory,
+    row_uniqueness_factory,
+    schema_contract_factory,
 )
 from montreal.defs.resources.lakehouse import location_of, s3_datastore
 
+# metadata
+ASSET_META = SilverAssetMetadata(
+    layer="silver",
+    data_category="geospatial",
+    segmentation="h3_r6",
+    description="Nearest amenity distance per Montreal address and livability category, sharded by r6 cell",
+)
 
-POI_CATEGORIES = ("grocery", "school", "health", "transit", "park", "bike")
-SILVER = {"layer": "silver","data_category": "geospacial"}
-PARTITION = {**SILVER, "segmentation": "h3_r6"}
+# data contract
+ASSET_DATA_CONTRACT = SilverAssetDataContract(
+    schema={
+        "ID_UEV": "str",
+        "h3_r10": "str",
+        "h3_r6": "str",
+        "geometry": "geometry",
+        **{f"dist_{category}": "numeric" for category in POI_CATEGORIES},
+    },
+    uniqueness=("ID_UEV",),
+    completeness=("ID_UEV", "h3_r10", "geometry"),
+)
 
-# Re-derive whenever an upstream asset produces a new snapshot (data version).
-_EAGER = dg.AutomationCondition.eager()
 
 def haversine(lon1, lat1, lon2, lat2):
     """Vectorized great-circle distance in metres. All args must be of equal length."""
     lon1, lat1, lon2, lat2 = map(np.radians, [lon1, lat1, lon2, lat2])
-    
+
     dlon = lon2 - lon1
     dlat = lat2 - lat1
-    
+
     a = np.sin(dlat/2.0)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2.0)**2
-    
+
     c = 2 * np.arcsin(np.sqrt(a))
     m = 6378.137 * c * 1000
     return m
+
 
 def nearest(addr_df, amenity_df, max_k=10, log=None) -> pd.DataFrame:
     """Nearest amenity distance per address and category using H3 ring search.
@@ -46,7 +70,7 @@ def nearest(addr_df, amenity_df, max_k=10, log=None) -> pd.DataFrame:
          every address in that cell.
       4. Haversine-distance every address to its candidates and keep the minimum.
     """
-    def _info(msg): 
+    def _info(msg):
         if log is not None: log.info(msg)
 
     dist_columns = [f"dist_{category}" for category in POI_CATEGORIES]
@@ -114,80 +138,19 @@ def nearest(addr_df, amenity_df, max_k=10, log=None) -> pd.DataFrame:
 
     return distances
 
-
-def _points_with_lat_lng(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    points = gdf.geometry.representative_point()
-    return gdf.assign(
-        geometry=points,
-        lat=points.y.to_numpy(dtype=float),
-        lng=points.x.to_numpy(dtype=float),
-    )
-
-def _amenity_frame(gdf: gpd.GeoDataFrame, category: str) -> gpd.GeoDataFrame:
-    points = _points_with_lat_lng(gdf)
-    points["category"] = category
-    return points[["category", "h3_r10", "lat", "lng", "geometry"]]
-
-
+# asset
 @dg.asset(
     group_name="distance",
-    metadata=SILVER,
-    deps=[
-        h3_montreal_osm_pois,
-        h3_montreal_transit_stops,
-        h3_montreal_parks,
-        h3_montreal_bike_paths,
-    ],
-    automation_condition=_EAGER,
-)
-def amenity_points(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
-    """amenity candidate points for nearest-distance search."""
-    # read data
-    osm_pois = s3_datastore.read_gpq(context, location_of(h3_montreal_osm_pois))
-    transit = s3_datastore.read_gpq(context, location_of(h3_montreal_transit_stops))
-    parks = s3_datastore.read_gpq(context, location_of(h3_montreal_parks))
-    bike_paths = s3_datastore.read_gpq(context, location_of(h3_montreal_bike_paths))
-
-    # concat POIs
-    frames = []
-    frames.append(_amenity_frame(osm_pois[osm_pois["category"] == "grocery"].copy(), "grocery"))
-    frames.append(_amenity_frame(osm_pois[osm_pois["category"] == "school"].copy(), "school"))
-    frames.append(_amenity_frame(osm_pois[osm_pois["category"] == "health"].copy(), "health"))
-    frames.append(_amenity_frame(transit, "transit"))
-    frames.append(_amenity_frame(parks, "park"))
-
-    # for bike paths, we use the path centroids 
-    bike = bike_paths[["h3_r10"]].drop_duplicates().copy()
-    latlng = np.array(bike["h3_r10"].map(h3.cell_to_latlng).tolist())
-    bike = bike.set_geometry(gpd.points_from_xy(latlng[:, 1], latlng[:, 0]), crs=4326)
-    frames.append(_amenity_frame(bike, "bike"))
-
-    # results
-    amenities = gpd.GeoDataFrame(pd.concat(frames, ignore_index=True), geometry="geometry", crs=4326,)
-    amenities = amenities.dropna(subset=["category", "h3_r10", "lat", "lng"])
-    context.log.info(f"amenity_points: {len(amenities)} rows")
-    for category in amenities["category"].unique():
-        count = (amenities["category"] == category).sum()
-        context.log.info(f"  {category}: {count} rows")
-
-    # export
-    stamp = s3_datastore.write_gpq(context, amenities)
-    return dg.MaterializeResult(data_version=dg.DataVersion(stamp) if stamp else None)
-
-
-@dg.asset(
-    group_name="distance",
-    metadata=PARTITION,
+    metadata=asdict(ASSET_META),
     partitions_def=r6_partitions,
-    deps=[h3_montreal_addresses, amenity_points],
-    automation_condition=_EAGER,
+    deps=[h3_montreal_addresses, amenities],
 )
 def distances_to_amenities(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """Nearest amenity distance per Montreal address and livability category."""
     addresses = s3_datastore.read_gpq(context, f"{location_of(h3_montreal_addresses)}/{context.partition_key}")
-    amenities = s3_datastore.read_gpq(context, location_of(amenity_points))
+    amenities = s3_datastore.read_gpq(context, location_of(amenities))
 
-    address_points = _points_with_lat_lng(addresses)
+    address_points = points_with_lat_lng(addresses)
     distance_df = nearest(address_points, amenities, log=context.log)
 
     out = addresses.copy()
@@ -197,3 +160,8 @@ def distances_to_amenities(context: dg.AssetExecutionContext, s3_datastore: s3_d
     context.log.info(f"distances_to_amenities: {len(out)} address rows with {len(distance_df.columns)} distance columns")
     stamp = s3_datastore.write_gpq(context, out)
     return dg.MaterializeResult(data_version=dg.DataVersion(stamp) if stamp else None)
+
+# asset checks
+distances_schema = schema_contract_factory(distances_to_amenities, ASSET_DATA_CONTRACT.schema)
+distances_uniqueness = row_uniqueness_factory(distances_to_amenities, ASSET_DATA_CONTRACT.uniqueness)
+distances_completeness = field_completeness_factory(distances_to_amenities, ASSET_DATA_CONTRACT.completeness)

@@ -1,0 +1,98 @@
+"""Unify per-category amenity points into candidate points for nearest-distance search."""
+
+from dataclasses import asdict
+
+import dagster as dg
+import geopandas as gpd
+import h3
+import numpy as np
+import pandas as pd
+
+from montreal.defs.assets.silver.config import (
+    SilverAssetDataContract,
+    SilverAssetMetadata,
+    points_with_lat_lng,
+)
+from montreal.defs.checks.factory import (
+    field_completeness_factory,
+    row_uniqueness_factory,
+    schema_contract_factory,
+)
+from montreal.defs.resources.lakehouse import location_of, s3_datastore
+from montreal.defs.assets.silver.h3 import (
+    h3_montreal_bike_paths,
+    h3_montreal_osm_pois,
+    h3_montreal_parks,
+    h3_montreal_transit_stops,
+)
+
+# metadata
+ASSET_META = SilverAssetMetadata(
+    layer="silver",
+    data_category="geospatial",
+    segmentation="snapshot",
+    description="Amenity candidate points (grocery/school/health/transit/park/bike) for nearest-distance search",
+)
+
+# data contract
+ASSET_DATA_CONTRACT = SilverAssetDataContract(
+    schema={"category": "str", "h3_r10": "str", "lat": "numeric", "lng": "numeric", "geometry": "geometry"},
+    uniqueness=("category", "lat", "lng"),
+    completeness=("category", "h3_r10", "lat", "lng", "geometry"),
+)
+
+
+def _amenity_frame(gdf: gpd.GeoDataFrame, category: str) -> gpd.GeoDataFrame:
+    points = points_with_lat_lng(gdf)
+    points["category"] = category
+    return points[["category", "h3_r10", "lat", "lng", "geometry"]]
+
+# asset
+@dg.asset(
+    group_name="distance",
+    metadata=asdict(ASSET_META),
+    deps=[
+        h3_montreal_osm_pois,
+        h3_montreal_transit_stops,
+        h3_montreal_parks,
+        h3_montreal_bike_paths,
+    ],
+)
+def amenities(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
+    """amenity candidate points for nearest-distance search."""
+    # read data
+    osm_pois = s3_datastore.read_gpq(context, location_of(h3_montreal_osm_pois))
+    transit = s3_datastore.read_gpq(context, location_of(h3_montreal_transit_stops))
+    parks = s3_datastore.read_gpq(context, location_of(h3_montreal_parks))
+    bike_paths = s3_datastore.read_gpq(context, location_of(h3_montreal_bike_paths))
+
+    # concat POIs
+    frames = []
+    frames.append(_amenity_frame(osm_pois[osm_pois["category"] == "grocery"].copy(), "grocery"))
+    frames.append(_amenity_frame(osm_pois[osm_pois["category"] == "school"].copy(), "school"))
+    frames.append(_amenity_frame(osm_pois[osm_pois["category"] == "health"].copy(), "health"))
+    frames.append(_amenity_frame(transit, "transit"))
+    frames.append(_amenity_frame(parks, "park"))
+
+    # for bike paths, we use the path centroids
+    bike = bike_paths[["h3_r10"]].drop_duplicates().copy()
+    latlng = np.array(bike["h3_r10"].map(h3.cell_to_latlng).tolist())
+    bike = bike.set_geometry(gpd.points_from_xy(latlng[:, 1], latlng[:, 0]), crs=4326)
+    frames.append(_amenity_frame(bike, "bike"))
+
+    # results
+    amenities = gpd.GeoDataFrame(pd.concat(frames, ignore_index=True), geometry="geometry", crs=4326,)
+    amenities = amenities.dropna(subset=["category", "h3_r10", "lat", "lng"])
+    context.log.info(f"amenity_points: {len(amenities)} rows")
+    for category in amenities["category"].unique():
+        count = (amenities["category"] == category).sum()
+        context.log.info(f"  {category}: {count} rows")
+
+    # export
+    stamp = s3_datastore.write_gpq(context, amenities)
+    return dg.MaterializeResult(data_version=dg.DataVersion(stamp) if stamp else None)
+
+# asset checks
+amenity_points_schema = schema_contract_factory(amenities, ASSET_DATA_CONTRACT.schema)
+amenity_points_uniqueness = row_uniqueness_factory(amenities, ASSET_DATA_CONTRACT.uniqueness)
+amenity_points_completeness = field_completeness_factory(amenities, ASSET_DATA_CONTRACT.completeness)
