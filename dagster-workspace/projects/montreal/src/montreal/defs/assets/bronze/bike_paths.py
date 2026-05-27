@@ -30,9 +30,9 @@ ASSET_META = BronzeAssetMetadata(
 
 # data contract
 ASSET_DATA_CONTRACT = BronzeAssetDataContract(
-    schema={"geometry": "geometry"},
-    uniqueness=("geometry",),
-    completeness=("geometry",),
+    schema={"ID_CYCL": "numeric", "geometry": "geometry"},
+    uniqueness=("ID_CYCL",),
+    completeness=("ID_CYCL", "geometry"),
     freshness={"max_days": 28},
 )
 
