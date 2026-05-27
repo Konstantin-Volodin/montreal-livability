@@ -116,6 +116,23 @@ class s3_datastore(dg.ConfigurableResource):
             # `to_markdown` needs `tabulate`; fall back to a plain table.
             return f"```\n{preview_df.to_string()}\n```"
 
+    def _snapshot_metadata(self, s3_path, file_size: int, gdf) -> dict:
+        """Rich materialization metadata for a snapshot, shared by fresh writes and cache hits."""
+        return {
+            "s3_location": dg.MetadataValue.text(str(s3_path)),
+            "file_size": dg.MetadataValue.text(format_size(file_size)),
+            "num_rows": dg.MetadataValue.int(len(gdf)),
+            "schema": dg.MetadataValue.json({col: str(gdf[col].dtype) for col in gdf.columns}),
+            "preview": dg.MetadataValue.md(self.gpq_preview(gdf)),
+        }
+
+    def describe_latest(self, context, directory: str) -> None:
+        """Emit metadata for a directory's latest snapshot, reading it but never rewriting it (used on cache hits)."""
+        key = self._resolve_latest(directory)
+        raw = self._s3.get_object(Bucket=self.bucket_name, Key=key)["Body"].read()
+        gdf = self._read_parquet_bytes(raw)
+        context.add_output_metadata(self._snapshot_metadata(self._base_path / key, len(raw), gdf))
+
     def write_gpq(self, context, gdf: gpd.GeoDataFrame) -> Optional[str]:
         """Write a GeoDataFrame to S3 as a timestamped Parquet snapshot; return its stamp."""
         if context.has_partition_key and gdf is not None and not gdf.empty:
@@ -145,16 +162,7 @@ class s3_datastore(dg.ConfigurableResource):
         s3_path = self._base_path / s3_key
         context.log.info(f"Wrote snapshot {s3_path}")
 
-        context.add_output_metadata(
-            {
-                "s3_write_location": dg.MetadataValue.text(str(s3_path)),
-                "s3_key": dg.MetadataValue.text(s3_key),
-                "file_size": dg.MetadataValue.text(format_size(file_size)),
-                "num_records": dg.MetadataValue.int(len(gdf)),
-                "columns": dg.MetadataValue.json(list(gdf.columns)),
-                "preview": dg.MetadataValue.md(self.gpq_preview(gdf)),
-            }
-        )
+        context.add_output_metadata(self._snapshot_metadata(s3_path, file_size, gdf))
         return stamp
 
     def write_gpq_partitioned(self, context, gdf: gpd.GeoDataFrame, column: str) -> Optional[str]:

@@ -13,9 +13,9 @@ class BronzeAssetMetadata:
 
 @dataclass(frozen=True)
 class BronzeAssetDataContract:
-    """Every bronze asset must set all four fields (no defaults — a missing one fails at import)."""
+    """Every bronze asset must set all four fields (no defaults - a missing one fails at import)."""
 
-    schema: Dict[str, str]        # column -> expected kind ("numeric"|"string"|"geometry")
+    schema: Dict[str, str]        # column -> expected kind ("numeric"|"str"|"geometry")
     uniqueness: Sequence[str]     # columns a row must be unique over
     completeness: Sequence[str]   # columns that must be non-null
     freshness: Dict[str, int]     # e.g. {"max_days": 365}

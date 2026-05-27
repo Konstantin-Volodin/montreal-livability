@@ -30,9 +30,9 @@ ASSET_META = BronzeAssetMetadata(
 
 # data contract
 ASSET_DATA_CONTRACT = BronzeAssetDataContract(
-    schema={"geometry": "geometry"},
+    schema={"geometry": "geometry","NOM":"str", "TYPE": "str"},
     uniqueness=("geometry",),
-    completeness=("geometry",),
+    completeness=("geometry","TYPE","NOM",),
     freshness={"max_days": 28},
 )
 
@@ -46,6 +46,7 @@ def montreal_municipality_boundaries(context: dg.AssetExecutionContext, s3_datas
 
     if age is not None and age <= datetime.timedelta(days=ASSET_DATA_CONTRACT.freshness["max_days"]):
         context.log.info(f"Using snapshot for {directory} ({age.days}d old).")
+        s3_datastore.describe_latest(context, directory)
         return dg.MaterializeResult(
             data_version=dg.DataVersion(f"{last:%Y%m%dT%H%M%S_%f}Z"),
             metadata={"s3_cache_hit": True, "snapshot_age_days": age.days},

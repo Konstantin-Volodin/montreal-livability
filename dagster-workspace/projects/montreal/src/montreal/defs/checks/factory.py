@@ -11,6 +11,7 @@ common checks:
 import datetime
 
 import dagster as dg
+import geopandas as gpd
 import pandas as pd
 
 from montreal.defs.resources.lakehouse import location_of, s3_datastore
@@ -27,7 +28,7 @@ def _dtype_matches(series: pd.Series, kind: str) -> bool:
     """Whether a column's dtype matches a contract kind."""
     if kind == "numeric":
         return pd.api.types.is_numeric_dtype(series)
-    if kind == "string":
+    if kind == "str":
         return pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)
     if kind == "geometry":
         return str(series.dtype) == "geometry"
@@ -77,24 +78,29 @@ def schema_contract_factory(asset: dg.AssetsDefinition, schema: dict[str, str]):
                 "missing_columns": dg.MetadataValue.json(missing),
                 "wrong_type": dg.MetadataValue.json(wrong_type),
                 "expected": dg.MetadataValue.json(dict(schema)),
+                "actual_schema": dg.MetadataValue.json({col: str(df[col].dtype) for col in df.columns}),
             },
         )
 
     return _check
 
-def row_uniqueness_factory(asset: dg.AssetsDefinition, subset: tuple[str, ...],):
-    """"""
+def row_uniqueness_factory(asset: dg.AssetsDefinition, subset: tuple[str, ...]):
+    """Rows are unique over ``subset`` (geometry columns compared by WKB)."""
     @dg.asset_check(asset=asset, name=CHECK_TYPES[2])
     def _check(context: dg.AssetCheckExecutionContext, s3_datastore: s3_datastore):
 
         df = s3_datastore.read_gpq(context, location_of(asset))
-        duplicates = df.duplicated(subset=subset).sum()
+        keys = df[list(subset)].copy()
+        for col in subset:
+            if str(df[col].dtype) == "geometry":
+                keys[col] = gpd.GeoSeries(df[col]).to_wkb()
+        duplicates = int(keys.duplicated().sum())
 
         return dg.AssetCheckResult(
             passed=duplicates == 0,
             severity=dg.AssetCheckSeverity.ERROR,
             metadata={
-                "duplicate_rows": int(duplicates),
+                "duplicate_rows": duplicates,
                 "subset": list(subset),
                 "total_rows": len(df),
             },

@@ -68,6 +68,7 @@ def montreal_addresses(context: dg.AssetExecutionContext, s3_datastore: s3_datas
 
     if age is not None and age <= datetime.timedelta(days=ASSET_DATA_CONTRACT.freshness["max_days"]):
         context.log.info(f"Using snapshot for {directory} ({age.days}d old).")
+        s3_datastore.describe_latest(context, directory)
         return dg.MaterializeResult(
             data_version=dg.DataVersion(f"{last:%Y%m%dT%H%M%S_%f}Z"),
             metadata={"s3_cache_hit": True, "snapshot_age_days": age.days},
