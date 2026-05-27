@@ -75,7 +75,7 @@ def montreal_municipality_boundaries(context: dg.AssetExecutionContext, s3_datas
 
 _BRONZE_META.update({"source": "geofabrik.de"})
 @dg.asset(group_name="raw_data", metadata=_BRONZE_META)
-def quebec_osm_pois(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
+def montreal_pois(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """Downloads the full Quebec OSM point-of-interest layers from Geofabrik once and writes them to S3."""
     url = "https://download.geofabrik.de/north-america/canada/quebec-latest-free.gpkg.zip"
     layers = ["gis_osm_pois_free", "gis_osm_pois_a_free"]

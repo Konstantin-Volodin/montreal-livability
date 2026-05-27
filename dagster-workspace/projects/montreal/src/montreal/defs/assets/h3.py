@@ -9,7 +9,7 @@ from montreal.defs.assets.raw import (
     montreal_municipality_boundaries,
     montreal_parks,
     montreal_transit_stops,
-    quebec_osm_pois,
+    montreal_pois,
 )
 from montreal.defs.resources.lakehouse import s3_datastore
 
@@ -52,7 +52,7 @@ _POI_CATEGORIES = {
 }
 
 
-@dg.asset(group_name="h3_indexed_data", metadata=_SILVER_META, deps=[montreal_addresses])
+@dg.asset(group_name="H3_indexed", metadata=_SILVER_META, deps=[montreal_addresses])
 def h3_montreal_addresses(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """H3-index addresses, shard the output by r6, and reconcile r6 partitions."""
     gdf = _to_wgs84(s3_datastore.read_gpq(context, "bronze/montreal_addresses.parquet"))
@@ -75,7 +75,7 @@ def h3_montreal_addresses(context: dg.AssetExecutionContext, s3_datastore: s3_da
     return dg.MaterializeResult()
 
 
-@dg.asset(group_name="reference_data", metadata=_SILVER_META, deps=[montreal_municipality_boundaries])
+@dg.asset(group_name="reference", metadata=_SILVER_META, deps=[montreal_municipality_boundaries])
 def montreal_municipalities(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """Normalize the official boundary polygons to ``[municipality, type, geometry]`` (WGS84)."""
     gdf = _to_wgs84(s3_datastore.read_gpq(context, "bronze/montreal_municipality_boundaries.parquet"))
@@ -91,7 +91,7 @@ def montreal_municipalities(context: dg.AssetExecutionContext, s3_datastore: s3_
     return dg.MaterializeResult()
 
 
-@dg.asset(group_name="h3_indexed_data", metadata=_SILVER_META, deps=[montreal_parks])
+@dg.asset(group_name="H3_indexed", metadata=_SILVER_META, deps=[montreal_parks])
 def h3_montreal_parks(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """apply h3 indexing to the montreal_parks asset; add the h3_r10 analysis column"""
     gdf = _to_wgs84(s3_datastore.read_gpq(context, "bronze/montreal_parks.parquet"))
@@ -101,7 +101,7 @@ def h3_montreal_parks(context: dg.AssetExecutionContext, s3_datastore: s3_datast
     return dg.MaterializeResult()
 
 
-@dg.asset(group_name="h3_indexed_data", metadata=_SILVER_META, deps=[montreal_transit_stops])
+@dg.asset(group_name="H3_indexed", metadata=_SILVER_META, deps=[montreal_transit_stops])
 def h3_montreal_transit_stops(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """apply h3 indexing to the montreal_transit_stops asset; add the h3_r10 analysis column"""
     gdf = _to_wgs84(s3_datastore.read_gpq(context, "bronze/montreal_transit_stops.parquet"))
@@ -111,7 +111,7 @@ def h3_montreal_transit_stops(context: dg.AssetExecutionContext, s3_datastore: s
     return dg.MaterializeResult()
 
 
-@dg.asset(group_name="h3_indexed_data", metadata=_SILVER_META, deps=[montreal_bike_paths])
+@dg.asset(group_name="H3_indexed", metadata=_SILVER_META, deps=[montreal_bike_paths])
 def h3_montreal_bike_paths(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """h3-cover the montreal_bike_paths lines (linetrace); add h3_r10, one row per covered r10 cell"""
     gdf = _to_wgs84(s3_datastore.read_gpq(context, "bronze/montreal_bike_paths.parquet"))
@@ -121,12 +121,12 @@ def h3_montreal_bike_paths(context: dg.AssetExecutionContext, s3_datastore: s3_d
     return dg.MaterializeResult()
 
 
-@dg.asset(group_name="h3_indexed_data", metadata=_SILVER_META, deps=[quebec_osm_pois])
+@dg.asset(group_name="H3_indexed", metadata=_SILVER_META, deps=[montreal_pois])
 def h3_montreal_osm_pois(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """Filter OSM POIs to livability categories used by the distance layer."""
 
     # read data
-    gdf = s3_datastore.read_gpq(context, "bronze/quebec_osm_pois.parquet")
+    gdf = s3_datastore.read_gpq(context, "bronze/montreal_pois.parquet")
     if "fclass" not in gdf.columns:
         raise ValueError(
             "Expected Geofabrik POI class column 'fclass'. "

@@ -8,9 +8,9 @@ import folium
 import pandas as pd
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from montreal.defs.assets.distance_layer import _AMENITY_CATEGORIES
+from montreal.defs.assets.distance import POI_CATEGORIES
 
-_AMENITY_LABELS = {
+POI_LABELS = {
     "grocery": "Grocery stores",
     "school": "Schools",
     "health": "Health",
@@ -18,7 +18,7 @@ _AMENITY_LABELS = {
     "transit": "Transit",
     "bike": "Bike paths",
 }
-_LIVABILITY_WEIGHTS = {
+SCORE_WEIGHTS = {
     "score_grocery": 0.20,
     "score_transit": 0.20,
     "score_park": 0.20,
@@ -26,13 +26,13 @@ _LIVABILITY_WEIGHTS = {
     "score_school": 0.15,
     "score_health": 0.10,
 }
-_ENV = Environment(
+ENV = Environment(
     loader=FileSystemLoader(Path(__file__).parent / "templates"),
     autoescape=select_autoescape(["html"]),
     trim_blocks=True,
     lstrip_blocks=True,
 )
-_COLORMAP = cm.LinearColormap(
+COLORMAP = cm.LinearColormap(
     ["#d7191c", "#fdae61", "#ffffbf", "#a6d96a", "#1a9641"],
     vmin=0.0,
     vmax=100.0,
@@ -70,7 +70,7 @@ def _hex_feature_collection(hexes: pd.DataFrame) -> dict:
             "addresses": int(row.addresses),
             "livability": round(float(row.livability), 1),
         }
-        for category in _AMENITY_CATEGORIES:
+        for category in POI_CATEGORIES:
             properties[f"score_{category}"] = round(
                 float(getattr(row, f"score_{category}")), 1
             )
@@ -98,16 +98,16 @@ def build_map_html(hexes: pd.DataFrame, boundaries: pd.DataFrame) -> str:
         zoom_start=11,
         tiles="cartodbpositron",
     )
-    _COLORMAP.add_to(fmap)
+    COLORMAP.add_to(fmap)
 
     metrics = [("livability", "Overall livability")]
-    metrics += [(f"score_{c}", c.capitalize()) for c in _AMENITY_CATEGORIES]
+    metrics += [(f"score_{c}", c.capitalize()) for c in POI_CATEGORIES]
     hex_layer = folium.GeoJson(
         _hex_feature_collection(hexes),
         name="Livability cells",
         style_function=lambda feature: {
-            "fillColor": _COLORMAP(feature["properties"]["livability"]),
-            "color": _COLORMAP(feature["properties"]["livability"]),
+            "fillColor": COLORMAP(feature["properties"]["livability"]),
+            "color": COLORMAP(feature["properties"]["livability"]),
             "weight": 0,
             "fillOpacity": 0.6,
         },
@@ -149,12 +149,12 @@ def build_map_html(hexes: pd.DataFrame, boundaries: pd.DataFrame) -> str:
         _key(feature["properties"]["municipality"]): feature
         for feature in boundary_collection["features"]
     }
-    map_script = _ENV.get_template("map_interactions.html").render(
+    map_script = ENV.get_template("map_interactions.html").render(
         map_name=map_name,
         hex_layer_name=hex_layer_name,
         boundary_group_name=boundary_group_name,
         boundary_features=boundary_features,
-        metric_weights=_LIVABILITY_WEIGHTS,
+        metric_weights=SCORE_WEIGHTS,
     )
     return map_html.replace(
         "</html>",
@@ -170,12 +170,12 @@ def render_report(*, stats: dict, table: pd.DataFrame, map_html: str) -> str:
         ("Mean livability", f"{stats['mean_livability']:.1f}"),
     ]
     amenity_pills = [
-        (_AMENITY_LABELS.get(c, c.capitalize()), f"{stats['by_category'].get(c, 0):,}")
-        for c in _AMENITY_CATEGORIES
+        (POI_LABELS.get(c, c.capitalize()), f"{stats['by_category'].get(c, 0):,}")
+        for c in POI_CATEGORIES
     ]
 
     columns = ["#", "Municipality", "Addresses", "Livability"]
-    columns += [c.capitalize() for c in _AMENITY_CATEGORIES]
+    columns += [c.capitalize() for c in POI_CATEGORIES]
     rows = [
         {
             "rank": rank,
@@ -183,13 +183,13 @@ def render_report(*, stats: dict, table: pd.DataFrame, map_html: str) -> str:
             "municipality_key": _key(r.municipality),
             "addresses": f"{int(r.addresses):,}",
             "livability": f"{r.livability:.1f}",
-            "livability_bg": _COLORMAP(r.livability),
-            "scores": [f"{getattr(r, f'score_{c}'):.0f}" for c in _AMENITY_CATEGORIES],
+            "livability_bg": COLORMAP(r.livability),
+            "scores": [f"{getattr(r, f'score_{c}'):.0f}" for c in POI_CATEGORIES],
         }
         for rank, r in enumerate(table.itertuples(index=False), 1)
     ]
 
-    return _ENV.get_template("report.html").render(
+    return ENV.get_template("report.html").render(
         summary_pills=summary_pills,
         amenity_pills=amenity_pills,
         columns=columns,
@@ -198,9 +198,9 @@ def render_report(*, stats: dict, table: pd.DataFrame, map_html: str) -> str:
         map_metrics=[
             {
                 "key": f"score_{category}",
-                "label": _AMENITY_LABELS.get(category, category.capitalize()),
+                "label": POI_LABELS.get(category, category.capitalize()),
             }
-            for category in _AMENITY_CATEGORIES
+            for category in POI_CATEGORIES
         ],
         map_html=map_html,
     )

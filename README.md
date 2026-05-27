@@ -51,9 +51,10 @@
 Folium choropleth: aggregate scores to `h3_r9` cells, color by mean livability, hover for the breakdown.
 
 ## 4. Future Extensions
-- personalized recommender
-- rent overlay
-- asset checks + monitoring + tests
+- p1 - personalized recommender
+- p2 - city optimization - where to build new amenities to maximize livability improvements?
+- data: rent overlay
+- tests: asset checks + monitoring + tests
 - freshness policy + automation schedule (e.g., update monthly or when data sources refresh)
 
 ### Personalized Recommender

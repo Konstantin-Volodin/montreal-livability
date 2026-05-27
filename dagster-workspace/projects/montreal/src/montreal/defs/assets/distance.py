@@ -4,7 +4,7 @@ import h3
 import numpy as np
 import pandas as pd
 
-from montreal.defs.assets.h3_layer import (
+from montreal.defs.assets.h3 import (
     _to_wgs84,
     h3_montreal_addresses,
     h3_montreal_bike_paths,
@@ -16,34 +16,28 @@ from montreal.defs.assets.h3_layer import (
 from montreal.defs.resources.lakehouse import s3_datastore
 
 
-_AMENITY_CATEGORIES = ("grocery", "school", "health", "transit", "park", "bike")
-_SILVER_META = {"layer": "silver","data_category": "geospacial"}
-_SILVER_PARTITIONED_META = {**_SILVER_META, "segmentation": "h3_r6"}
-_EARTH_RADIUS_METRES = 6371000.0
+POI_CATEGORIES = ("grocery", "school", "health", "transit", "park", "bike")
+SILVER = {"layer": "silver","data_category": "geospacial"}
+PARTITION = {**SILVER, "segmentation": "h3_r6"}
 
+def haversine_np(lon1, lat1, lon2, lat2):
+    """Vectorized great-circle distance in metres. All args must be of equal length."""
+    lon1, lat1, lon2, lat2 = map(np.radians, [lon1, lat1, lon2, lat2])
+    
+    dlon = lon2 - lon1
+    dlat = lat2 - lat1
+    
+    a = np.sin(dlat/2.0)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2.0)**2
+    
+    c = 2 * np.arcsin(np.sqrt(a))
+    m = 6378.137 * c * 1000
+    return m
 
-def _haversine_metres(lat1, lng1, lat2, lng2) -> np.ndarray:
-    """Vectorized great-circle distance in metres."""
-    lat1_rad = np.radians(np.asarray(lat1, dtype=float))
-    lng1_rad = np.radians(np.asarray(lng1, dtype=float))
-    lat2_rad = np.radians(np.asarray(lat2, dtype=float))
-    lng2_rad = np.radians(np.asarray(lng2, dtype=float))
+def nearest(addr_df, amenity_df, max_k=10, log=None) -> pd.DataFrame:
+    """Nearest amenity distance per address and category using H3 ring search.
 
-    dlat = lat2_rad - lat1_rad
-    dlng = lng2_rad - lng1_rad
-    a = (
-        np.sin(dlat / 2.0) ** 2
-        + np.cos(lat1_rad) * np.cos(lat2_rad) * np.sin(dlng / 2.0) ** 2
-    )
-    return _EARTH_RADIUS_METRES * 2.0 * np.arcsin(np.sqrt(a))
-
-
-def _nearest_distances(addr_df, amenity_df, max_k=10, log=None) -> pd.DataFrame:
-    """Nearest amenity distance per address row and category using H3 ring search.
-
-    The algorithm, step by step:
+    algorithm:
       1. Drop address rows missing an H3 cell or coordinates.
-      2. For each amenity category, index its points by the H3 r10 cell they fall in.
       3. For each (category, address cell), step the H3 ring distance outward
          k = 0, 1, 2, ... and stop at the first k whose ring holds amenity
          points (giving up after max_k) -- those become the candidate set for
@@ -53,7 +47,7 @@ def _nearest_distances(addr_df, amenity_df, max_k=10, log=None) -> pd.DataFrame:
     def _info(msg): 
         if log is not None: log.info(msg)
 
-    dist_columns = [f"dist_{category}" for category in _AMENITY_CATEGORIES]
+    dist_columns = [f"dist_{category}" for category in POI_CATEGORIES]
     distances = pd.DataFrame(index=addr_df.index, columns=dist_columns, dtype=float)
 
     # Step 1: only addresses with a cell + lat/lng can be matched.
@@ -62,7 +56,7 @@ def _nearest_distances(addr_df, amenity_df, max_k=10, log=None) -> pd.DataFrame:
 
     # Step 2: bucket each category's points by the H3 r10 cell they sit in.
     points_by_category = {}
-    for category in _AMENITY_CATEGORIES:
+    for category in POI_CATEGORIES:
         category_df = amenity_df[amenity_df["category"] == category]
         points_by_category[category] = {
             cell: group[["lat", "lng"]].to_numpy(dtype=float)
@@ -100,7 +94,7 @@ def _nearest_distances(addr_df, amenity_df, max_k=10, log=None) -> pd.DataFrame:
 
             positions = np.flatnonzero(cells == addr_cell)
             addr_coords = coords[positions]
-            candidate_distances = _haversine_metres(
+            candidate_distances = haversine(
                 addr_coords[:, [0]],
                 addr_coords[:, [1]],
                 candidates[None, :, 0],
@@ -134,8 +128,8 @@ def _amenity_frame(gdf: gpd.GeoDataFrame, category: str) -> gpd.GeoDataFrame:
 
 
 @dg.asset(
-    group_name="distance_layer",
-    metadata=_SILVER_META,
+    group_name="distance",
+    metadata=SILVER,
     deps=[
         h3_montreal_osm_pois,
         h3_montreal_transit_stops,
@@ -179,8 +173,8 @@ def amenity_points(context: dg.AssetExecutionContext, s3_datastore: s3_datastore
 
 
 @dg.asset(
-    group_name="distance_layer",
-    metadata=_SILVER_PARTITIONED_META,
+    group_name="distance",
+    metadata=PARTITION,
     partitions_def=r6_partitions,
     deps=[h3_montreal_addresses, amenity_points],
 )
@@ -190,7 +184,7 @@ def distances_to_amenities(context: dg.AssetExecutionContext, s3_datastore: s3_d
     amenities = s3_datastore.read_gpq(context, "silver/amenity_points.parquet")
 
     address_points = _points_with_lat_lng(addresses)
-    distance_df = _nearest_distances(address_points, amenities, log=context.log)
+    distance_df = nearest(address_points, amenities, log=context.log)
 
     out = addresses.copy()
     for column in distance_df.columns:

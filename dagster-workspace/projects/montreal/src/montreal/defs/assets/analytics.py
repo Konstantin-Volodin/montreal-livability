@@ -8,17 +8,17 @@ import pandas as pd
 from shapely.geometry import Point, Polygon
 
 from montreal.defs.assets import report
-from montreal.defs.assets.distance_layer import (
-    _AMENITY_CATEGORIES,
+from montreal.defs.assets.distance import (
+    POI_CATEGORIES,
     distances_to_amenities,
 )
-from montreal.defs.assets.h3_layer import montreal_municipalities
+from montreal.defs.assets.h3 import montreal_municipalities
 from montreal.defs.resources.lakehouse import s3_datastore
 
 _UNKNOWN_MUNICIPALITY = "Inconnu"
 _GOLD_META = {"layer": "gold", "data_category": "geospacial"}
 _SCORE_CURVE = ((100.0, 100.0), (500.0, 50.0), (1000.0, 20.0))
-_SCORE_COLUMNS = [f"score_{c}" for c in _AMENITY_CATEGORIES]
+_SCORE_COLUMNS = [f"score_{c}" for c in POI_CATEGORIES]
 
 
 def _tag_municipalities(cells: pd.Series, boundaries: gpd.GeoDataFrame) -> pd.Series:
@@ -74,7 +74,7 @@ def livability_score(
             "h3_r10": distances["h3_r10"].to_numpy(),
             **{
                 f"score_{c}": _distance_score(distances[f"dist_{c}"].to_numpy())
-                for c in _AMENITY_CATEGORIES
+                for c in POI_CATEGORIES
             },
         }
     )
@@ -85,7 +85,7 @@ def livability_score(
     )
     out["municipality"] = _tag_municipalities(out["h3_r10"], boundaries).to_numpy()
 
-    for category in _AMENITY_CATEGORIES:
+    for category in POI_CATEGORIES:
         column = f"score_{category}"
         resolved = int(np.count_nonzero(out[column].to_numpy() > 0))
         context.log.info(
@@ -94,7 +94,7 @@ def livability_score(
             if resolved else f"  category '{category}': 0 cells scored"
         )
 
-    weights = {category: getattr(config, category) for category in _AMENITY_CATEGORIES}
+    weights = {category: getattr(config, category) for category in POI_CATEGORIES}
     total = sum(weights.values())
     if total <= 0:
         raise ValueError(f"Livability weights must sum to > 0, got {weights}")
