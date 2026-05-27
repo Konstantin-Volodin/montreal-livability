@@ -1,5 +1,7 @@
 """Gold livability scores and HTML report."""
 
+from datetime import timedelta
+
 import dagster as dg
 import geopandas as gpd
 import h3
@@ -10,13 +12,21 @@ from shapely.geometry import Point, Polygon
 from montreal.defs.assets import report
 from montreal.defs.assets.distance import (
     POI_CATEGORIES,
+    amenity_points,
     distances_to_amenities,
 )
 from montreal.defs.assets.h3 import montreal_municipalities
-from montreal.defs.resources.lakehouse import s3_datastore
+from montreal.defs.resources.lakehouse import location_of, s3_datastore
 
 _UNKNOWN_MUNICIPALITY = "Inconnu"
 _GOLD_META = {"layer": "gold", "data_category": "geospacial"}
+
+# Re-derive whenever an upstream snapshot changes; the report carries the
+# end-to-end monthly freshness SLA for the whole pipeline.
+_EAGER = dg.AutomationCondition.eager()
+_GOLD_FRESHNESS = dg.FreshnessPolicy.cron(
+    deadline_cron="0 0 1 * *", lower_bound_delta=timedelta(days=2)
+)
 _SCORE_CURVE = ((100.0, 100.0), (500.0, 50.0), (1000.0, 20.0))
 _SCORE_COLUMNS = [f"score_{c}" for c in POI_CATEGORIES]
 
@@ -57,6 +67,7 @@ class LivabilityWeights(dg.Config):
     group_name="analytics",
     metadata=_GOLD_META,
     deps=[distances_to_amenities, montreal_municipalities],
+    automation_condition=_EAGER,
 )
 def livability_score(
     context: dg.AssetExecutionContext,
@@ -64,10 +75,8 @@ def livability_score(
     config: LivabilityWeights,
 ) -> dg.MaterializeResult:
     """Per-r10-cell amenity scores + the weighted livability blend (gold)."""
-    distances = s3_datastore.read_gpq_prefix(
-        context, "silver/distances_to_amenities.parquet/"
-    )
-    boundaries = s3_datastore.read_gpq(context, "silver/montreal_municipalities.parquet")
+    distances = s3_datastore.read_gpq_prefix(context, location_of(distances_to_amenities))
+    boundaries = s3_datastore.read_gpq(context, location_of(montreal_municipalities))
 
     per_address = pd.DataFrame(
         {
@@ -109,8 +118,9 @@ def livability_score(
         f"(weights {weights}, sum {total:.2f})"
     )
 
-    s3_datastore.write_gpq(context, out)
+    stamp = s3_datastore.write_gpq(context, out)
     return dg.MaterializeResult(
+        data_version=dg.DataVersion(stamp) if stamp else None,
         metadata={
             "num_cells": dg.MetadataValue.int(len(out)),
             "weights": dg.MetadataValue.json(weights),
@@ -162,28 +172,27 @@ def _municipality_table(scores: pd.DataFrame) -> pd.DataFrame:
 @dg.asset(
     group_name="analytics",
     metadata=_GOLD_META,
-    deps=[livability_score, montreal_municipalities],
+    deps=[livability_score, amenity_points, montreal_municipalities],
+    automation_condition=_EAGER,
+    freshness_policy=_GOLD_FRESHNESS,
 )
 def livability_map(
     context: dg.AssetExecutionContext,
     s3_datastore: s3_datastore,
 ) -> dg.MaterializeResult:
     """HTML livability report: summary pills, municipality ranking, embedded map (gold)."""
-    scores = s3_datastore.read_gpq(context, "gold/livability_score.parquet")
-    amenities = s3_datastore.read_gpq(context, "silver/amenity_points.parquet")
-    boundaries = s3_datastore.read_gpq(context, "silver/montreal_municipalities.parquet")
+    scores = s3_datastore.read_gpq(context, location_of(livability_score))
+    amenities = s3_datastore.read_gpq(context, location_of(amenity_points))
+    boundaries = s3_datastore.read_gpq(context, location_of(montreal_municipalities))
 
     hexes = _agg_hexes(scores, 9)
     table = _municipality_table(scores)
 
-    weights = scores["n_addresses"].to_numpy(dtype=float)
     stats = {
-        "addresses": int(weights.sum()),
+        "addresses": int(scores["n_addresses"].sum()),
         "amenities": int(len(amenities)),
         "by_category": amenities["category"].value_counts().to_dict(),
-        "mean_livability": float(
-            np.average(scores["livability"].to_numpy(dtype=float), weights=weights)
-        ),
+        "mean_livability": float(scores["livability"].mean()),
         "municipalities": int(table["municipality"].nunique()),
     }
 
@@ -193,7 +202,7 @@ def livability_map(
         f"mean livability {stats['mean_livability']:.1f}"
     )
 
-    s3_datastore.write_html(
+    stamp = s3_datastore.write_html(
         context,
         report.render_report(
             stats=stats,
@@ -202,6 +211,7 @@ def livability_map(
         ),
     )
     return dg.MaterializeResult(
+        data_version=dg.DataVersion(stamp),
         metadata={
             "num_addresses": dg.MetadataValue.int(stats["addresses"]),
             "num_amenities": dg.MetadataValue.int(stats["amenities"]),

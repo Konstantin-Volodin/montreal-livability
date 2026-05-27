@@ -5,7 +5,6 @@ import numpy as np
 import pandas as pd
 
 from montreal.defs.assets.h3 import (
-    _to_wgs84,
     h3_montreal_addresses,
     h3_montreal_bike_paths,
     h3_montreal_osm_pois,
@@ -13,14 +12,17 @@ from montreal.defs.assets.h3 import (
     h3_montreal_transit_stops,
     r6_partitions,
 )
-from montreal.defs.resources.lakehouse import s3_datastore
+from montreal.defs.resources.lakehouse import location_of, s3_datastore
 
 
 POI_CATEGORIES = ("grocery", "school", "health", "transit", "park", "bike")
 SILVER = {"layer": "silver","data_category": "geospacial"}
 PARTITION = {**SILVER, "segmentation": "h3_r6"}
 
-def haversine_np(lon1, lat1, lon2, lat2):
+# Re-derive whenever an upstream asset produces a new snapshot (data version).
+_EAGER = dg.AutomationCondition.eager()
+
+def haversine(lon1, lat1, lon2, lat2):
     """Vectorized great-circle distance in metres. All args must be of equal length."""
     lon1, lat1, lon2, lat2 = map(np.radians, [lon1, lat1, lon2, lat2])
     
@@ -136,14 +138,15 @@ def _amenity_frame(gdf: gpd.GeoDataFrame, category: str) -> gpd.GeoDataFrame:
         h3_montreal_parks,
         h3_montreal_bike_paths,
     ],
+    automation_condition=_EAGER,
 )
 def amenity_points(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """amenity candidate points for nearest-distance search."""
     # read data
-    osm_pois = s3_datastore.read_gpq(context, "silver/h3_montreal_osm_pois.parquet")
-    transit = s3_datastore.read_gpq(context, "silver/h3_montreal_transit_stops.parquet")
-    parks = s3_datastore.read_gpq(context, "silver/h3_montreal_parks.parquet")
-    bike_paths = s3_datastore.read_gpq(context, "silver/h3_montreal_bike_paths.parquet")
+    osm_pois = s3_datastore.read_gpq(context, location_of(h3_montreal_osm_pois))
+    transit = s3_datastore.read_gpq(context, location_of(h3_montreal_transit_stops))
+    parks = s3_datastore.read_gpq(context, location_of(h3_montreal_parks))
+    bike_paths = s3_datastore.read_gpq(context, location_of(h3_montreal_bike_paths))
 
     # concat POIs
     frames = []
@@ -166,10 +169,10 @@ def amenity_points(context: dg.AssetExecutionContext, s3_datastore: s3_datastore
     for category in amenities["category"].unique():
         count = (amenities["category"] == category).sum()
         context.log.info(f"  {category}: {count} rows")
-    
+
     # export
-    s3_datastore.write_gpq(context, amenities)
-    return dg.MaterializeResult()
+    stamp = s3_datastore.write_gpq(context, amenities)
+    return dg.MaterializeResult(data_version=dg.DataVersion(stamp) if stamp else None)
 
 
 @dg.asset(
@@ -177,11 +180,12 @@ def amenity_points(context: dg.AssetExecutionContext, s3_datastore: s3_datastore
     metadata=PARTITION,
     partitions_def=r6_partitions,
     deps=[h3_montreal_addresses, amenity_points],
+    automation_condition=_EAGER,
 )
 def distances_to_amenities(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """Nearest amenity distance per Montreal address and livability category."""
-    addresses = _to_wgs84(s3_datastore.read_gpq(context, f"silver/h3_montreal_addresses.parquet/{context.partition_key}.parquet"))
-    amenities = s3_datastore.read_gpq(context, "silver/amenity_points.parquet")
+    addresses = s3_datastore.read_gpq(context, f"{location_of(h3_montreal_addresses)}/{context.partition_key}")
+    amenities = s3_datastore.read_gpq(context, location_of(amenity_points))
 
     address_points = _points_with_lat_lng(addresses)
     distance_df = nearest(address_points, amenities, log=context.log)
@@ -191,5 +195,5 @@ def distances_to_amenities(context: dg.AssetExecutionContext, s3_datastore: s3_d
         out[column] = distance_df[column].to_numpy()
 
     context.log.info(f"distances_to_amenities: {len(out)} address rows with {len(distance_df.columns)} distance columns")
-    s3_datastore.write_gpq(context, out)
-    return dg.MaterializeResult()
+    stamp = s3_datastore.write_gpq(context, out)
+    return dg.MaterializeResult(data_version=dg.DataVersion(stamp) if stamp else None)

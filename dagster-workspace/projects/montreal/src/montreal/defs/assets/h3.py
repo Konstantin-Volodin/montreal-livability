@@ -11,17 +11,11 @@ from montreal.defs.assets.raw import (
     montreal_transit_stops,
     montreal_pois,
 )
-from montreal.defs.resources.lakehouse import s3_datastore
+from montreal.defs.resources.lakehouse import location_of, s3_datastore
 
 # dynamic r6 partitions for the address layer
 r6_partitions = dg.DynamicPartitionsDefinition(name="address_r6")
 
-
-def _to_wgs84(gdf):
-    """h3 needs lat/lng; reproject (or assume 4326 when the CRS is missing)."""
-    if gdf.crs is None: return gdf.set_crs(4326, allow_override=True)
-    if gdf.crs.to_epsg() != 4326: return gdf.to_crs(4326)
-    return gdf
 
 def _h3_index(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """Add the h3_r10 analysis column."""
@@ -45,6 +39,9 @@ _SILVER_META = {
     "segmentation": "snapshot",
 }
 
+# Re-derive whenever an upstream asset produces a new snapshot (data version).
+_EAGER = dg.AutomationCondition.eager()
+
 _POI_CATEGORIES = {
     "grocery": {"supermarket", "convenience", "greengrocer", "bakery", "butcher"},
     "school": {"school", "college", "university", "kindergarten"},
@@ -52,10 +49,10 @@ _POI_CATEGORIES = {
 }
 
 
-@dg.asset(group_name="H3_indexed", metadata=_SILVER_META, deps=[montreal_addresses])
+@dg.asset(group_name="H3_indexed", metadata=_SILVER_META, deps=[montreal_addresses], automation_condition=_EAGER)
 def h3_montreal_addresses(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """H3-index addresses, shard the output by r6, and reconcile r6 partitions."""
-    gdf = _to_wgs84(s3_datastore.read_gpq(context, "bronze/montreal_addresses.parquet"))
+    gdf = s3_datastore.read_gpq(context, location_of(montreal_addresses))
     gdf = _h3_index(gdf)
     gdf["h3_r6"] = gdf["h3_r10"].map(lambda cell: str(h3.cell_to_parent(cell, 6)))
     gdf = gdf[gdf["h3_r6"].notna()]
@@ -71,14 +68,14 @@ def h3_montreal_addresses(context: dg.AssetExecutionContext, s3_datastore: s3_da
         f"(+{len(desired - existing)} / -{len(existing - desired)})"
     )
 
-    s3_datastore.write_gpq_partitioned(context, gdf, "h3_r6")
-    return dg.MaterializeResult()
+    stamp = s3_datastore.write_gpq_partitioned(context, gdf, "h3_r6")
+    return dg.MaterializeResult(data_version=dg.DataVersion(stamp) if stamp else None)
 
 
-@dg.asset(group_name="reference", metadata=_SILVER_META, deps=[montreal_municipality_boundaries])
+@dg.asset(group_name="reference", metadata=_SILVER_META, deps=[montreal_municipality_boundaries], automation_condition=_EAGER)
 def montreal_municipalities(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """Normalize the official boundary polygons to ``[municipality, type, geometry]`` (WGS84)."""
-    gdf = _to_wgs84(s3_datastore.read_gpq(context, "bronze/montreal_municipality_boundaries.parquet"))
+    gdf = s3_datastore.read_gpq(context, location_of(montreal_municipality_boundaries))
     for col in ("NOM", "TYPE"):
         if col not in gdf.columns:
             raise ValueError(
@@ -87,46 +84,46 @@ def montreal_municipalities(context: dg.AssetExecutionContext, s3_datastore: s3_
             )
     out = gdf.rename(columns={"NOM": "municipality", "TYPE": "type"})[["municipality", "type", "geometry"]]
     context.log.info(f"montreal_municipalities: {len(out)} boundaries ({out['type'].value_counts().to_dict()})")
-    s3_datastore.write_gpq(context, out)
-    return dg.MaterializeResult()
+    stamp = s3_datastore.write_gpq(context, out)
+    return dg.MaterializeResult(data_version=dg.DataVersion(stamp) if stamp else None)
 
 
-@dg.asset(group_name="H3_indexed", metadata=_SILVER_META, deps=[montreal_parks])
+@dg.asset(group_name="H3_indexed", metadata=_SILVER_META, deps=[montreal_parks], automation_condition=_EAGER)
 def h3_montreal_parks(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """apply h3 indexing to the montreal_parks asset; add the h3_r10 analysis column"""
-    gdf = _to_wgs84(s3_datastore.read_gpq(context, "bronze/montreal_parks.parquet"))
+    gdf = s3_datastore.read_gpq(context, location_of(montreal_parks))
     gdf = _h3_index(gdf)
     context.log.info(f"montreal_parks: {len(gdf)} rows H3-indexed (r10)")
-    s3_datastore.write_gpq(context, gdf)
-    return dg.MaterializeResult()
+    stamp = s3_datastore.write_gpq(context, gdf)
+    return dg.MaterializeResult(data_version=dg.DataVersion(stamp) if stamp else None)
 
 
-@dg.asset(group_name="H3_indexed", metadata=_SILVER_META, deps=[montreal_transit_stops])
+@dg.asset(group_name="H3_indexed", metadata=_SILVER_META, deps=[montreal_transit_stops], automation_condition=_EAGER)
 def h3_montreal_transit_stops(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """apply h3 indexing to the montreal_transit_stops asset; add the h3_r10 analysis column"""
-    gdf = _to_wgs84(s3_datastore.read_gpq(context, "bronze/montreal_transit_stops.parquet"))
+    gdf = s3_datastore.read_gpq(context, location_of(montreal_transit_stops))
     gdf = _h3_index(gdf)
     context.log.info(f"montreal_transit_stops: {len(gdf)} rows H3-indexed (r10)")
-    s3_datastore.write_gpq(context, gdf)
-    return dg.MaterializeResult()
+    stamp = s3_datastore.write_gpq(context, gdf)
+    return dg.MaterializeResult(data_version=dg.DataVersion(stamp) if stamp else None)
 
 
-@dg.asset(group_name="H3_indexed", metadata=_SILVER_META, deps=[montreal_bike_paths])
+@dg.asset(group_name="H3_indexed", metadata=_SILVER_META, deps=[montreal_bike_paths], automation_condition=_EAGER)
 def h3_montreal_bike_paths(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """h3-cover the montreal_bike_paths lines (linetrace); add h3_r10, one row per covered r10 cell"""
-    gdf = _to_wgs84(s3_datastore.read_gpq(context, "bronze/montreal_bike_paths.parquet"))
+    gdf = s3_datastore.read_gpq(context, location_of(montreal_bike_paths))
     gdf = _h3_linetrace(gdf)
     context.log.info(f"montreal_bike_paths: {len(gdf)} (path, r10 cell) rows H3-traced")
-    s3_datastore.write_gpq(context, gdf)
-    return dg.MaterializeResult()
+    stamp = s3_datastore.write_gpq(context, gdf)
+    return dg.MaterializeResult(data_version=dg.DataVersion(stamp) if stamp else None)
 
 
-@dg.asset(group_name="H3_indexed", metadata=_SILVER_META, deps=[montreal_pois])
+@dg.asset(group_name="H3_indexed", metadata=_SILVER_META, deps=[montreal_pois], automation_condition=_EAGER)
 def h3_montreal_osm_pois(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """Filter OSM POIs to livability categories used by the distance layer."""
 
     # read data
-    gdf = s3_datastore.read_gpq(context, "bronze/montreal_pois.parquet")
+    gdf = s3_datastore.read_gpq(context, location_of(montreal_pois))
     if "fclass" not in gdf.columns:
         raise ValueError(
             "Expected Geofabrik POI class column 'fclass'. "
@@ -148,8 +145,7 @@ def h3_montreal_osm_pois(context: dg.AssetExecutionContext, s3_datastore: s3_dat
         categorized["name"] = None
 
     # h3 indexing
-    h3_indexed = _to_wgs84(categorized)
-    h3_indexed = _h3_index(h3_indexed)
+    h3_indexed = _h3_index(categorized)
     context.log.info("h3_montreal_osm_pois: added the h3_r10 analysis column")
 
     final = h3_indexed[["geometry", "h3_r10", "name", "category"]]
@@ -159,5 +155,5 @@ def h3_montreal_osm_pois(context: dg.AssetExecutionContext, s3_datastore: s3_dat
         f"{final['category'].nunique()} categories"
     )
 
-    s3_datastore.write_gpq(context, final)
-    return dg.MaterializeResult()
+    stamp = s3_datastore.write_gpq(context, final)
+    return dg.MaterializeResult(data_version=dg.DataVersion(stamp) if stamp else None)
