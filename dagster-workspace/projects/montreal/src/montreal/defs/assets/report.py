@@ -18,6 +18,14 @@ POI_LABELS = {
     "transit": "Transit",
     "bike": "Bike paths",
 }
+TABLE_LABELS = {
+    "grocery": "Gro.",
+    "school": "Sch.",
+    "health": "Health",
+    "transit": "Transit",
+    "park": "Park",
+    "bike": "Bike",
+}
 SCORE_WEIGHTS = {
     "score_grocery": 0.20,
     "score_transit": 0.20,
@@ -164,18 +172,29 @@ def build_map_html(hexes: pd.DataFrame, boundaries: pd.DataFrame) -> str:
 
 
 def render_report(*, stats: dict, table: pd.DataFrame, map_html: str) -> str:
-    summary_pills = [
+    summary_stats = [
         ("Addresses scored", f"{stats['addresses']:,}"),
+        ("Amenities indexed", f"{stats['amenities']:,}"),
         ("Municipalities", str(stats["municipalities"])),
         ("Mean livability", f"{stats['mean_livability']:.1f}"),
     ]
-    amenity_pills = [
-        (POI_LABELS.get(c, c.capitalize()), f"{stats['by_category'].get(c, 0):,}")
-        for c in POI_CATEGORIES
-    ]
+    category_total = max(sum(stats["by_category"].get(c, 0) for c in POI_CATEGORIES), 1)
+    category_stats = sorted(
+        [
+            {
+                "label": POI_LABELS.get(c, c.capitalize()),
+                "value": f"{stats['by_category'].get(c, 0):,}",
+                "count": stats["by_category"].get(c, 0),
+                "share": round(stats["by_category"].get(c, 0) / category_total * 100, 1),
+            }
+            for c in POI_CATEGORIES
+        ],
+        key=lambda item: item["count"],
+        reverse=True,
+    )
 
     columns = ["#", "Municipality", "Addresses", "Livability"]
-    columns += [c.capitalize() for c in POI_CATEGORIES]
+    columns += [TABLE_LABELS.get(c, c.capitalize()) for c in POI_CATEGORIES]
     rows = [
         {
             "rank": rank,
@@ -190,8 +209,8 @@ def render_report(*, stats: dict, table: pd.DataFrame, map_html: str) -> str:
     ]
 
     return ENV.get_template("report.html").render(
-        summary_pills=summary_pills,
-        amenity_pills=amenity_pills,
+        summary_stats=summary_stats,
+        category_stats=category_stats,
         columns=columns,
         rows=rows,
         municipality_count=len(rows),
