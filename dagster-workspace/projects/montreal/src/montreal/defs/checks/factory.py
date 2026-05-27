@@ -35,6 +35,19 @@ def _dtype_matches(series: pd.Series, kind: str) -> bool:
     raise ValueError(f"Unknown schema kind {kind!r}")
 
 
+def _read_whole(context, s3_datastore, asset: dg.AssetsDefinition):
+    """Read an asset's full dataset, concatenating shards for sharded (partitioned) assets.
+
+    Sharded assets (metadata ``segmentation`` set to a column, e.g. ``h3_r6``) have no
+    single ``_latest`` at their base dir, so they are read across all per-shard subdirs.
+    """
+    location = location_of(asset)
+    segmentation = asset.metadata_by_key[asset.key].get("segmentation")
+    if segmentation in (None, "snapshot"):
+        return s3_datastore.read_gpq(context, location)
+    return s3_datastore.read_gpq_prefix(context, location)
+
+
 def snapshot_freshness_factory(asset: dg.AssetsDefinition, freshness: dict[str, int]):
     """Latest snapshot is no older than ``freshness['max_days']``."""
     max_days = freshness["max_days"]
@@ -61,7 +74,7 @@ def schema_contract_factory(asset: dg.AssetsDefinition, schema: dict[str, str]):
     """Each contract column exists and has the expected dtype kind."""
     @dg.asset_check(asset=asset, name=CHECK_TYPES[1])
     def _check(context: dg.AssetCheckExecutionContext, s3_datastore: s3_datastore):
-        df = s3_datastore.read_gpq(context, location_of(asset))
+        df = _read_whole(context, s3_datastore, asset)
 
         present = set(df.columns)
         missing = sorted(col for col in schema if col not in present)
@@ -89,7 +102,7 @@ def row_uniqueness_factory(asset: dg.AssetsDefinition, subset: tuple[str, ...]):
     @dg.asset_check(asset=asset, name=CHECK_TYPES[2])
     def _check(context: dg.AssetCheckExecutionContext, s3_datastore: s3_datastore):
 
-        df = s3_datastore.read_gpq(context, location_of(asset))
+        df = _read_whole(context, s3_datastore, asset)
         keys = df[list(subset)].copy()
         for col in subset:
             if str(df[col].dtype) == "geometry":
@@ -116,7 +129,7 @@ def field_completeness_factory(
     @dg.asset_check(asset=asset, name=CHECK_TYPES[3])
     def _check(context: dg.AssetCheckExecutionContext, s3_datastore: s3_datastore):
 
-        df = s3_datastore.read_gpq(context, location_of(asset))
+        df = _read_whole(context, s3_datastore, asset)
 
         null_ratios = {}
         failing_columns = []
