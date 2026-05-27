@@ -9,13 +9,13 @@ import numpy as np
 import pandas as pd
 from shapely.geometry import Point, Polygon
 
-from montreal.defs.assets import report
-from montreal.defs.assets.distance import (
+from montreal.defs.assets.gold import report
+from montreal.defs.assets.silver.distance import (
     POI_CATEGORIES,
     amenity_points,
     distances_to_amenities,
 )
-from montreal.defs.assets.h3 import montreal_municipalities
+from montreal.defs.assets.silver.h3 import montreal_municipalities
 from montreal.defs.resources.lakehouse import location_of, s3_datastore
 
 _UNKNOWN_MUNICIPALITY = "Inconnu"

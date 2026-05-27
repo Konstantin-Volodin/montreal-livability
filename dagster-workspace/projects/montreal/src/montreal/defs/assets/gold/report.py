@@ -8,7 +8,7 @@ import folium
 import pandas as pd
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from montreal.defs.assets.distance import POI_CATEGORIES
+from montreal.defs.assets.silver.distance import POI_CATEGORIES
 
 POI_LABELS = {
     "grocery": "Grocery stores",

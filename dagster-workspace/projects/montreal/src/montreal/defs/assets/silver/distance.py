@@ -4,7 +4,7 @@ import h3
 import numpy as np
 import pandas as pd
 
-from montreal.defs.assets.h3 import (
+from montreal.defs.assets.silver.h3 import (
     h3_montreal_addresses,
     h3_montreal_bike_paths,
     h3_montreal_osm_pois,

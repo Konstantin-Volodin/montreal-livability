@@ -3,7 +3,7 @@ import geopandas as gpd
 import h3
 import h3pandas
 
-from montreal.defs.assets.raw import (
+from montreal.defs.assets.bronze.raw import (
     montreal_addresses,
     montreal_bike_paths,
     montreal_municipality_boundaries,
