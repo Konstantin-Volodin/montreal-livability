@@ -26,6 +26,9 @@ from montreal.defs.assets.silver.h3 import (
     h3_montreal_transit_stops,
 )
 
+# Bump to force a recompute when this asset's logic changes, even if inputs haven't.
+CODE_VERSION = "1"
+
 # metadata
 ASSET_META = SilverAssetMetadata(
     layer="silver",
@@ -57,9 +60,19 @@ def _amenity_frame(gdf: gpd.GeoDataFrame, category: str) -> gpd.GeoDataFrame:
         h3_montreal_parks,
         h3_montreal_bike_paths,
     ],
+    code_version=CODE_VERSION,
 )
 def amenities(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """amenity candidate points for nearest-distance search."""
+    upstreams = [
+        location_of(h3_montreal_osm_pois),
+        location_of(h3_montreal_transit_stops),
+        location_of(h3_montreal_parks),
+        location_of(h3_montreal_bike_paths),
+    ]
+    if s3_datastore.should_skip(context, upstreams, code_version=CODE_VERSION):
+        return s3_datastore.reemit_latest(context)
+
     # read data
     osm_pois = s3_datastore.read_gpq(context, location_of(h3_montreal_osm_pois))
     transit = s3_datastore.read_gpq(context, location_of(h3_montreal_transit_stops))
@@ -89,7 +102,7 @@ def amenities(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> 
         context.log.info(f"  {category}: {count} rows")
 
     # export
-    stamp = s3_datastore.write_gpq(context, amenities)
+    stamp = s3_datastore.write_gpq(context, amenities, code_version=CODE_VERSION)
     return dg.MaterializeResult(data_version=dg.DataVersion(stamp) if stamp else None)
 
 # asset checks

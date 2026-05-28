@@ -17,6 +17,9 @@ from montreal.defs.checks.factory import (
 )
 from montreal.defs.resources.lakehouse import location_of, s3_datastore
 
+# Bump to force a recompute when this asset's logic changes, even if inputs haven't.
+CODE_VERSION = "1"
+
 # metadata
 ASSET_META = SilverAssetMetadata(
     layer="silver",
@@ -39,9 +42,11 @@ _POI_CATEGORIES = {
 }
 
 # asset
-@dg.asset(group_name="H3_indexed", metadata=asdict(ASSET_META), deps=[montreal_pois])
+@dg.asset(group_name="H3_indexed", metadata=asdict(ASSET_META), deps=[montreal_pois], code_version=CODE_VERSION)
 def h3_montreal_osm_pois(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """Filter OSM POIs to livability categories used by the distance layer."""
+    if s3_datastore.should_skip(context, [location_of(montreal_pois)], code_version=CODE_VERSION):
+        return s3_datastore.reemit_latest(context)
 
     # read data
     gdf = s3_datastore.read_gpq(context, location_of(montreal_pois))
@@ -76,7 +81,7 @@ def h3_montreal_osm_pois(context: dg.AssetExecutionContext, s3_datastore: s3_dat
         f"{final['category'].nunique()} categories"
     )
 
-    stamp = s3_datastore.write_gpq(context, final)
+    stamp = s3_datastore.write_gpq(context, final, code_version=CODE_VERSION)
     return dg.MaterializeResult(data_version=dg.DataVersion(stamp) if stamp else None)
 
 # asset checks

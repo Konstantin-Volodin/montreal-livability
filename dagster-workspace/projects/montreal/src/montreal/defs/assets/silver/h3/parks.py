@@ -17,6 +17,9 @@ from montreal.defs.checks.factory import (
 )
 from montreal.defs.resources.lakehouse import location_of, s3_datastore
 
+# Bump to force a recompute when this asset's logic changes, even if inputs haven't.
+CODE_VERSION = "1"
+
 # metadata
 ASSET_META = SilverAssetMetadata(
     layer="silver",
@@ -33,13 +36,16 @@ ASSET_DATA_CONTRACT = SilverAssetDataContract(
 )
 
 # asset
-@dg.asset(group_name="H3_indexed", metadata=asdict(ASSET_META), deps=[montreal_parks])
+@dg.asset(group_name="H3_indexed", metadata=asdict(ASSET_META), deps=[montreal_parks], code_version=CODE_VERSION)
 def h3_montreal_parks(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """apply h3 indexing to the montreal_parks asset; add the h3_r10 analysis column"""
+    if s3_datastore.should_skip(context, [location_of(montreal_parks)], code_version=CODE_VERSION):
+        return s3_datastore.reemit_latest(context)
+
     gdf = s3_datastore.read_gpq(context, location_of(montreal_parks))
     gdf = h3_index(gdf)
     context.log.info(f"montreal_parks: {len(gdf)} rows H3-indexed (r10)")
-    stamp = s3_datastore.write_gpq(context, gdf)
+    stamp = s3_datastore.write_gpq(context, gdf, code_version=CODE_VERSION)
     return dg.MaterializeResult(data_version=dg.DataVersion(stamp) if stamp else None)
 
 # asset checks
