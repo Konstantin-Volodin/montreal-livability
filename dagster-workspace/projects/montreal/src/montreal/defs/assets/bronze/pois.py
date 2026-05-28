@@ -20,7 +20,6 @@ from montreal.defs.checks.factory import (
     field_completeness_factory,
     row_uniqueness_factory,
     schema_contract_factory,
-    snapshot_freshness_factory,
 )
 
 # metadata
@@ -43,7 +42,7 @@ ASSET_DATA_CONTRACT = BronzeAssetDataContract(
     },
     uniqueness=("osm_id",),
     completeness=("fclass", "geometry"),
-    freshness={"max_days": 28},
+    freshness={"max_days": 25},
 )
 
 _MONTREAL_BBOX = (-74.05, 45.35, -73.40, 45.75)
@@ -137,11 +136,7 @@ def montreal_pois(context: dg.AssetExecutionContext, s3_datastore: s3_datastore)
 
     if age is not None and age <= datetime.timedelta(days=ASSET_DATA_CONTRACT.freshness["max_days"]):
         context.log.info(f"Using snapshot for {directory} ({age.days}d old).")
-        s3_datastore.describe_latest(context, directory)
-        return dg.MaterializeResult(
-            data_version=dg.DataVersion(f"{last:%Y%m%dT%H%M%S_%f}Z"),
-            metadata={"s3_cache_hit": True, "snapshot_age_days": age.days},
-        )
+        return s3_datastore.reemit_latest(context)
 
     context.log.info("Downloading latest dataset")
     data = _read_osm_pois_from_overpass(context)
@@ -152,7 +147,6 @@ def montreal_pois(context: dg.AssetExecutionContext, s3_datastore: s3_datastore)
     )
 
 # asset checks
-pois_freshness = snapshot_freshness_factory(montreal_pois, ASSET_DATA_CONTRACT.freshness)
 pois_schema = schema_contract_factory(montreal_pois, ASSET_DATA_CONTRACT.schema)
 pois_uniqueness = row_uniqueness_factory(montreal_pois, ASSET_DATA_CONTRACT.uniqueness)
 pois_completeness = field_completeness_factory(montreal_pois, ASSET_DATA_CONTRACT.completeness)

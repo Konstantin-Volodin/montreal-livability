@@ -16,7 +16,6 @@ from montreal.defs.checks.factory import (
     field_completeness_factory,
     row_uniqueness_factory,
     schema_contract_factory,
-    snapshot_freshness_factory,
 )
 
 # metadata
@@ -33,7 +32,7 @@ ASSET_DATA_CONTRACT = BronzeAssetDataContract(
     schema={"ID_CYCL": "numeric", "geometry": "geometry"},
     uniqueness=("ID_CYCL",),
     completeness=("ID_CYCL", "geometry"),
-    freshness={"max_days": 28},
+    freshness={"max_days": 360},
 )
 
 # asset
@@ -46,11 +45,7 @@ def montreal_bike_paths(context: dg.AssetExecutionContext, s3_datastore: s3_data
 
     if age is not None and age <= datetime.timedelta(days=ASSET_DATA_CONTRACT.freshness["max_days"]):
         context.log.info(f"Using snapshot for {directory} ({age.days}d old).")
-        s3_datastore.describe_latest(context, directory)
-        return dg.MaterializeResult(
-            data_version=dg.DataVersion(f"{last:%Y%m%dT%H%M%S_%f}Z"),
-            metadata={"s3_cache_hit": True, "snapshot_age_days": age.days},
-        )
+        return s3_datastore.reemit_latest(context)
 
     context.log.info("Downloading latest dataset")
     data = gpd.read_file(ASSET_META.url)
@@ -61,7 +56,6 @@ def montreal_bike_paths(context: dg.AssetExecutionContext, s3_datastore: s3_data
     )
 
 # asset checks
-bike_paths_freshness = snapshot_freshness_factory(montreal_bike_paths, ASSET_DATA_CONTRACT.freshness)
 bike_paths_schema = schema_contract_factory(montreal_bike_paths, ASSET_DATA_CONTRACT.schema)
 bike_paths_uniqueness = row_uniqueness_factory(montreal_bike_paths, ASSET_DATA_CONTRACT.uniqueness)
 bike_paths_completeness = field_completeness_factory(montreal_bike_paths, ASSET_DATA_CONTRACT.completeness)

@@ -16,7 +16,6 @@ from montreal.defs.checks.factory import (
     field_completeness_factory,
     row_uniqueness_factory,
     schema_contract_factory,
-    snapshot_freshness_factory,
 )
 
 # metadata
@@ -33,7 +32,7 @@ ASSET_DATA_CONTRACT = BronzeAssetDataContract(
     schema={"geometry": "geometry"},
     uniqueness=("geometry",),
     completeness=("geometry",),
-    freshness={"max_days": 28},
+    freshness={"max_days": 25},
 )
 
 
@@ -46,11 +45,7 @@ def montreal_parks(context: dg.AssetExecutionContext, s3_datastore: s3_datastore
 
     if age is not None and age <= datetime.timedelta(days=ASSET_DATA_CONTRACT.freshness["max_days"]):
         context.log.info(f"Using snapshot for {directory} ({age.days}d old).")
-        s3_datastore.describe_latest(context, directory)
-        return dg.MaterializeResult(
-            data_version=dg.DataVersion(f"{last:%Y%m%dT%H%M%S_%f}Z"),
-            metadata={"s3_cache_hit": True, "snapshot_age_days": age.days},
-        )
+        return s3_datastore.reemit_latest(context)
 
     context.log.info("Downloading latest dataset")
     data = gpd.read_file(ASSET_META.url)
@@ -61,7 +56,6 @@ def montreal_parks(context: dg.AssetExecutionContext, s3_datastore: s3_datastore
     )
 
 # asset checks
-parks_freshness = snapshot_freshness_factory(montreal_parks, ASSET_DATA_CONTRACT.freshness)
 parks_schema = schema_contract_factory(montreal_parks, ASSET_DATA_CONTRACT.schema)
 parks_uniqueness = row_uniqueness_factory(montreal_parks, ASSET_DATA_CONTRACT.uniqueness)
 parks_completeness = field_completeness_factory(montreal_parks, ASSET_DATA_CONTRACT.completeness)
