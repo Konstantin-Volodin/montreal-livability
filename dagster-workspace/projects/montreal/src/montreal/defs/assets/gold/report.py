@@ -8,7 +8,7 @@ import folium
 import pandas as pd
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from montreal.defs.assets.silver.distance import POI_CATEGORIES
+from montreal.defs.assets.silver.config import POI_CATEGORIES
 
 POI_LABELS = {
     "grocery": "Grocery stores",
@@ -214,6 +214,7 @@ def render_report(*, stats: dict, table: pd.DataFrame, map_html: str) -> str:
         columns=columns,
         rows=rows,
         municipality_count=len(rows),
+        updated_on=stats.get("updated_on", ""),
         map_metrics=[
             {
                 "key": f"score_{category}",
