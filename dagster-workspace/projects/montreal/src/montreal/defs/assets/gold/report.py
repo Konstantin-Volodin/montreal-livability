@@ -8,6 +8,7 @@ import folium
 import pandas as pd
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from montreal.defs.assets.gold.config import DEFAULT_WEIGHTS
 from montreal.defs.assets.silver.config import POI_CATEGORIES
 
 POI_LABELS = {
@@ -26,14 +27,8 @@ TABLE_LABELS = {
     "park": "Park",
     "bike": "Bike",
 }
-SCORE_WEIGHTS = {
-    "score_grocery": 0.20,
-    "score_transit": 0.20,
-    "score_park": 0.20,
-    "score_bike": 0.15,
-    "score_school": 0.15,
-    "score_health": 0.10,
-}
+# Same blend weights the scoring asset uses, keyed by score column.
+SCORE_WEIGHTS = {f"score_{c}": w for c, w in DEFAULT_WEIGHTS.items()}
 ENV = Environment(
     loader=FileSystemLoader(Path(__file__).parent / "templates"),
     autoescape=select_autoescape(["html"]),

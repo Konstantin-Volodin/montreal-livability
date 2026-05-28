@@ -10,6 +10,7 @@ import pandas as pd
 from shapely.geometry import Point
 
 from montreal.defs.assets.gold.config import (
+    DEFAULT_WEIGHTS,
     SCORE_COLUMNS,
     UNKNOWN_MUNICIPALITY,
     GoldAssetDataContract,
@@ -18,12 +19,7 @@ from montreal.defs.assets.gold.config import (
 from montreal.defs.assets.silver.config import POI_CATEGORIES
 from montreal.defs.assets.silver.municipalities import montreal_municipalities
 from montreal.defs.assets.silver.distances import distances_to_amenities
-from montreal.defs.checks.factory import (
-    field_completeness_factory,
-    row_uniqueness_factory,
-    schema_contract_factory,
-    value_range_factory,
-)
+from montreal.defs.checks.factory import standard_checks
 from montreal.defs.resources.lakehouse import location_of, s3_datastore
 
 # Bump to force a recompute when this asset's logic changes, even if inputs haven't.
@@ -56,12 +52,12 @@ def _distance_score(distances) -> np.ndarray:
 
 
 class LivabilityWeights(dg.Config):
-    grocery: float = 0.20
-    transit: float = 0.20
-    park: float = 0.20
-    bike: float = 0.15
-    school: float = 0.15
-    health: float = 0.10
+    grocery: float = DEFAULT_WEIGHTS["grocery"]
+    transit: float = DEFAULT_WEIGHTS["transit"]
+    park: float = DEFAULT_WEIGHTS["park"]
+    bike: float = DEFAULT_WEIGHTS["bike"]
+    school: float = DEFAULT_WEIGHTS["school"]
+    health: float = DEFAULT_WEIGHTS["health"]
 
 
 ASSET_META = GoldAssetMetadata(
@@ -160,7 +156,4 @@ def livability_score(
 
 
 # asset checks
-livability_score_schema = schema_contract_factory(livability_score, ASSET_DATA_CONTRACT.schema)
-livability_score_uniqueness = row_uniqueness_factory(livability_score, ASSET_DATA_CONTRACT.uniqueness)
-livability_score_completeness = field_completeness_factory(livability_score, ASSET_DATA_CONTRACT.completeness)
-livability_score_bounds = value_range_factory(livability_score, ASSET_DATA_CONTRACT.bounds)
+checks = standard_checks(livability_score, ASSET_DATA_CONTRACT)
