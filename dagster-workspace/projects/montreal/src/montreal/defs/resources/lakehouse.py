@@ -1,6 +1,7 @@
 """S3-backed lakehouse resource: GeoDataFrames as timestamped Parquet snapshots."""
 
 import io
+import json
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -14,6 +15,11 @@ from upath import UPath
 # Sibling object in every snapshot directory; its body is the key of the
 # newest ``*.parquet`` snapshot, so reads resolve "latest" with one GET.
 _POINTER = "_latest"
+
+# Sibling JSON recording what produced a directory's latest output (currently
+# the asset's ``code_version``), so a logic change forces a recompute even when
+# the upstream data is byte-for-byte unchanged. See ``should_skip``.
+_PROVENANCE = "_provenance"
 
 
 def format_size(size_bytes: int) -> str:
@@ -81,14 +87,69 @@ class s3_datastore(dg.ConfigurableResource):
         obj = self._s3.get_object(Bucket=self.bucket_name, Key=f"{directory}/{_POINTER}")
         return obj["Body"].read().decode("utf-8")
 
-    def latest_timestamp(self, directory: str) -> Optional[datetime]:
-        """Parse the timestamp of the directory's latest snapshot, or None if absent."""
+    def latest_stamp(self, directory: str) -> Optional[str]:
+        """Raw sortable stamp of the directory's latest snapshot, or None if absent.
+
+        Stamps are fixed-width UTC strings (``%Y%m%dT%H%M%S_%fZ``), so they order
+        lexicographically — comparing two stamps as plain strings is a valid
+        "which is newer" test, which is what the change-detection skip relies on.
+        """
         try:
             key = self._resolve_latest(directory)
         except self._s3.exceptions.ClientError:
             return None
-        stamp = key.rsplit("/", 1)[-1].removesuffix(".parquet")
+        return key.rsplit("/", 1)[-1].removesuffix(".parquet")
+
+    def latest_timestamp(self, directory: str) -> Optional[datetime]:
+        """Parse the timestamp of the directory's latest snapshot, or None if absent."""
+        stamp = self.latest_stamp(directory)
+        if stamp is None:
+            return None
         return datetime.strptime(stamp, "%Y%m%dT%H%M%S_%fZ").replace(tzinfo=timezone.utc)
+
+    def _shard_dirs(self, prefix: str) -> list[str]:
+        """Immediate per-shard subdirectories under ``prefix`` (one S3 ``CommonPrefixes`` listing)."""
+        paginator = self._s3.get_paginator("list_objects_v2")
+        return [
+            cp["Prefix"].rstrip("/")
+            for page in paginator.paginate(
+                Bucket=self.bucket_name, Prefix=f"{prefix}/", Delimiter="/"
+            )
+            for cp in page.get("CommonPrefixes", [])
+        ]
+
+    def shard_keys(self, prefix: str) -> list[str]:
+        """Names (last path segment) of the per-shard subdirs under ``prefix``.
+
+        Used to re-register dynamic partitions from S3 when the Dagster instance is
+        ephemeral and a sharded producer (e.g. ``h3_montreal_addresses``) skips its
+        recompute but its r6 partitions still must exist for downstream consumers.
+        """
+        return [directory.rsplit("/", 1)[-1] for directory in self._shard_dirs(prefix)]
+
+    def latest_stamp_under_prefix(self, prefix: str) -> Optional[str]:
+        """Newest stamp across every per-shard subdir under ``prefix`` (None if no shards)."""
+        stamps = [s for s in (self.latest_stamp(d) for d in self._shard_dirs(prefix)) if s]
+        return max(stamps) if stamps else None
+
+    def _write_provenance(self, directory: str, code_version: Optional[str]) -> None:
+        """Record what produced this directory's latest output (alongside ``_latest``)."""
+        self._s3.put_object(
+            Bucket=self.bucket_name,
+            Key=f"{directory}/{_PROVENANCE}",
+            Body=json.dumps({"code_version": code_version}).encode("utf-8"),
+        )
+
+    def read_provenance(self, directory: str) -> Optional[dict]:
+        """The directory's provenance record, or None if it was never written."""
+        try:
+            obj = self._s3.get_object(Bucket=self.bucket_name, Key=f"{directory}/{_PROVENANCE}")
+        except self._s3.exceptions.ClientError:
+            return None
+        try:
+            return json.loads(obj["Body"].read().decode("utf-8"))
+        except ValueError:
+            return None
 
     @staticmethod
     def _to_wgs84(gdf):
@@ -133,7 +194,88 @@ class s3_datastore(dg.ConfigurableResource):
         gdf = self._read_parquet_bytes(raw)
         context.add_output_metadata(self._snapshot_metadata(self._base_path / key, len(raw), gdf))
 
-    def write_gpq(self, context, gdf: gpd.GeoDataFrame) -> Optional[str]:
+    # --- change-detection skip (serverless: all state lives in S3) -----------
+
+    def _own_dir(self, context) -> str:
+        """Directory holding this asset's output for the current run.
+
+        The partition's shard dir for a partitioned run, else the base dir (which,
+        for a sharded producer, is the parent of every shard subdir).
+        """
+        return self.asset_dir(context, context.partition_key if context.has_partition_key else None)
+
+    def output_stamp(self, context) -> Optional[str]:
+        """Stamp of this asset's own latest output, or None if it has never been written.
+
+        Resolves a single snapshot, a partition's shard, or the newest stamp across
+        all shards of a sharded asset, depending on how this asset writes.
+        """
+        if context.has_partition_key:
+            return self.latest_stamp(self.asset_dir(context, context.partition_key))
+        segmentation = context.assets_def.metadata_by_key[context.asset_key].get("segmentation")
+        base = location_of(context.assets_def)
+        if segmentation in (None, "snapshot"):
+            return self.latest_stamp(base)
+        return self.latest_stamp_under_prefix(base)
+
+    def should_skip(self, context, upstreams, code_version: Optional[str] = None) -> bool:
+        """Whether this asset can reuse its existing output instead of recomputing.
+
+        True iff (a) it already has an output, (b) that output was produced by the
+        same ``code_version``, and (c) every upstream's latest stamp is no newer
+        than this asset's own output stamp — i.e. nothing upstream changed since.
+        Each ``upstreams`` entry is a directory string, or a ``(directory, is_prefix)``
+        tuple where ``is_prefix`` takes the newest stamp across the dir's shards.
+
+        Because a bronze cache hit never rewrites its snapshot, an upstream stamp
+        only advances on a real content change, so stamp dominance is a sound,
+        DB-free "did my inputs change" test.
+        """
+        mine = self.output_stamp(context)
+        if mine is None:
+            return False
+
+        provenance = self.read_provenance(self._own_dir(context)) or {}
+        if provenance.get("code_version") != code_version:
+            context.log.info(
+                f"code_version changed ({provenance.get('code_version')!r} -> {code_version!r}); recomputing."
+            )
+            return False
+
+        for entry in upstreams:
+            directory, is_prefix = entry if isinstance(entry, tuple) else (entry, False)
+            upstream = (
+                self.latest_stamp_under_prefix(directory) if is_prefix else self.latest_stamp(directory)
+            )
+            if upstream is None or upstream > mine:
+                context.log.info(
+                    f"upstream {directory} changed (upstream={upstream}, mine={mine}); recomputing."
+                )
+                return False
+
+        context.log.info(f"inputs unchanged since {mine}; reusing existing output.")
+        return True
+
+    def reemit_latest(self, context) -> dg.MaterializeResult:
+        """Re-emit the existing output: stable DataVersion + cache-hit metadata, no S3 write.
+
+        ``_latest`` still points at the valid snapshot, so downstream reads keep
+        working; re-emitting the same DataVersion means no spurious invalidation.
+        """
+        stamp = self.output_stamp(context)
+        try:
+            if context.has_partition_key:
+                self.describe_latest(context, self.asset_dir(context, context.partition_key))
+            elif context.assets_def.metadata_by_key[context.asset_key].get("segmentation") in (None, "snapshot"):
+                self.describe_latest(context, location_of(context.assets_def))
+        except self._s3.exceptions.ClientError:
+            pass  # sharded base dir has no single _latest; the stable DataVersion is enough
+        return dg.MaterializeResult(
+            data_version=dg.DataVersion(stamp) if stamp else None,
+            metadata={"skipped_unchanged": dg.MetadataValue.bool(True)},
+        )
+
+    def write_gpq(self, context, gdf: gpd.GeoDataFrame, code_version: Optional[str] = None) -> Optional[str]:
         """Write a GeoDataFrame to S3 as a timestamped Parquet snapshot; return its stamp."""
         if context.has_partition_key and gdf is not None and not gdf.empty:
             metadata = context.assets_def.metadata_by_key[context.asset_key]
@@ -158,14 +300,16 @@ class s3_datastore(dg.ConfigurableResource):
         file_size = buffer.getbuffer().nbytes
 
         stamp = self._now_stamp()
-        s3_key = self._put_snapshot(self.asset_dir(context, shard), buffer, stamp)
+        directory = self.asset_dir(context, shard)
+        s3_key = self._put_snapshot(directory, buffer, stamp)
+        self._write_provenance(directory, code_version)
         s3_path = self._base_path / s3_key
         context.log.info(f"Wrote snapshot {s3_path}")
 
         context.add_output_metadata(self._snapshot_metadata(s3_path, file_size, gdf))
         return stamp
 
-    def write_gpq_partitioned(self, context, gdf: gpd.GeoDataFrame, column: str) -> Optional[str]:
+    def write_gpq_partitioned(self, context, gdf: gpd.GeoDataFrame, column: str, code_version: Optional[str] = None) -> Optional[str]:
         """Pre-shard a GeoDataFrame into one snapshot dir per distinct ``column`` value, so an r6-partitioned consumer reads only its slice. Returns the shared stamp."""
         if gdf is None or gdf.empty:
             context.log.info("No data. Skipping partitioned write.")
@@ -180,6 +324,9 @@ class s3_datastore(dg.ConfigurableResource):
             buffer.seek(0)
             self._put_snapshot(self.asset_dir(context, str(value)), buffer, stamp)
             written += 1
+
+        # One provenance record at the base dir covers the whole sharded asset.
+        self._write_provenance(self.asset_dir(context), code_version)
 
         context.log.info(f"write_gpq_partitioned: {written} snapshots under {self.asset_dir(context)}/ keyed by '{column}'")
         context.add_output_metadata(
@@ -212,14 +359,7 @@ class s3_datastore(dg.ConfigurableResource):
 
     def read_gpq_prefix(self, context, prefix: str) -> gpd.GeoDataFrame:
         """Concat the latest snapshot of every per-partition subdir under ``prefix`` (the viz layer reading an r6-partitioned asset whole)."""
-        paginator = self._s3.get_paginator("list_objects_v2")
-        subdirs = [
-            cp["Prefix"].rstrip("/")
-            for page in paginator.paginate(
-                Bucket=self.bucket_name, Prefix=f"{prefix}/", Delimiter="/"
-            )
-            for cp in page.get("CommonPrefixes", [])
-        ]
+        subdirs = self._shard_dirs(prefix)
         if not subdirs:
             raise FileNotFoundError(f"No partitions under s3://{self.bucket_name}/{prefix}/")
 
