@@ -2,27 +2,20 @@
 Montreal points of interest: query OpenStreetMap via Overpass, cache on S3, validate.
 """
 
-import dagster as dg
-import geopandas as gpd
-import datetime
 import json
 import urllib.parse
 import urllib.request
-from dataclasses import asdict
+
+import dagster as dg
+import geopandas as gpd
 from shapely.geometry import Point
 
-from montreal.defs.resources.lakehouse import s3_datastore
 from montreal.defs.assets.bronze.config import (
-    BronzeAssetDataContract, 
+    BronzeAssetDataContract,
     BronzeAssetMetadata,
-)
-from montreal.defs.checks.factory import (
-    field_completeness_factory,
-    row_uniqueness_factory,
-    schema_contract_factory,
+    raw_geo_asset,
 )
 
-# metadata
 ASSET_META = BronzeAssetMetadata(
     layer="bronze",
     data_category="geospatial",
@@ -31,7 +24,6 @@ ASSET_META = BronzeAssetMetadata(
     url="https://overpass-api.de/api/interpreter",
 )
 
-# data contract
 ASSET_DATA_CONTRACT = BronzeAssetDataContract(
     schema={
         "osm_type": "str",
@@ -46,41 +38,50 @@ ASSET_DATA_CONTRACT = BronzeAssetDataContract(
 )
 
 _MONTREAL_BBOX = (-74.05, 45.35, -73.40, 45.75)
-_OSM_POI_TAGS = {
+
+# livability category -> {OSM tag key -> accepted values}. 
+OSM_POI_TAGS = {
     "grocery": {"shop": {"supermarket", "convenience", "greengrocer", "bakery", "butcher"}},
     "school": {"amenity": {"school", "college", "university", "kindergarten"}},
     "health": {"amenity": {"clinic", "hospital", "pharmacy", "doctors", "dentist"}},
 }
 
-def _overpass_query_for_bbox(bbox: tuple[float, float, float, float]) -> str:
-    minx, miny, maxx, maxy = bbox
-    overpass_bbox = f"{miny},{minx},{maxy},{maxx}"
-    selectors = []
-    for tag_groups in _OSM_POI_TAGS.values():
-        for key, values in tag_groups.items():
-            pattern = "|".join(sorted(values))
-            selectors.append(f'nwr["{key}"~"^({pattern})$"]({overpass_bbox});')
+# update OSM tag into the form Overpass query can use
+_TAGS_BY_KEY: dict[str, set[str]] = {}
+for _groups in OSM_POI_TAGS.values():
+    for _key, _vals in _groups.items():
+        _TAGS_BY_KEY.setdefault(_key, set()).update(_vals)
 
+
+def _overpass_query(bbox: tuple[float, float, float, float]) -> str:
+    """Overpass QL selecting every node/way/relation in `bbox` matching _TAGS_BY_KEY."""
+    minx, miny, maxx, maxy = bbox
+    area = f"{miny},{minx},{maxy},{maxx}"
+    selectors = [
+        f'nwr["{key}"~"^({"|".join(sorted(values))})$"]({area});'
+        for key, values in _TAGS_BY_KEY.items()
+    ]
     return "\n".join(["[out:json][timeout:180];", "(", *selectors, ");", "out tags center;"])
 
 
-def _osm_fclass(tags: dict) -> str | None:
-    for tag_groups in _OSM_POI_TAGS.values():
-        for key, values in tag_groups.items():
-            if tags.get(key) in values:
-                return tags[key]
+def _fclass(tags: dict) -> str | None:
+    """The accepted OSM value present on `tags` (kept as the row's fclass), or None."""
+    for key, values in _TAGS_BY_KEY.items():
+        if tags.get(key) in values:
+            return tags[key]
     return None
 
 
-def _osm_lon_lat(element: dict) -> tuple[float | None, float | None]:
+def _lon_lat(element: dict) -> tuple[float | None, float | None]:
+    """An element's coordinates, from its own lon/lat or its `center` (ways/relations)."""
     if "lon" in element and "lat" in element:
         return element["lon"], element["lat"]
     center = element.get("center") or {}
     return center.get("lon"), center.get("lat")
 
 
-def _read_osm_pois_from_overpass(context: dg.AssetExecutionContext) -> gpd.GeoDataFrame:
-    query = _overpass_query_for_bbox(_MONTREAL_BBOX)
+def _post_overpass(context: dg.AssetExecutionContext, query: str) -> list[dict]:
+    """POST `query` to Overpass and return its raw element list."""
     payload = urllib.parse.urlencode({"data": query}).encode("utf-8")
     req = urllib.request.Request(
         ASSET_META.url,
@@ -93,14 +94,16 @@ def _read_osm_pois_from_overpass(context: dg.AssetExecutionContext) -> gpd.GeoDa
     )
     context.log.info("Querying Overpass for Montréal OSM POIs.")
     with urllib.request.urlopen(req, timeout=240) as resp:
-        body = resp.read()
+        return json.loads(resp.read()).get("elements", [])
 
-    rows = []
-    seen = set()
-    for element in json.loads(body).get("elements", []):
+
+def _elements_to_points(elements: list[dict]) -> gpd.GeoDataFrame:
+    """WGS84 point frame from Overpass elements, dropping unclassifiable, locationless, or duplicate rows."""
+    rows, seen = [], set()
+    for element in elements:
         tags = element.get("tags") or {}
-        fclass = _osm_fclass(tags)
-        lon, lat = _osm_lon_lat(element)
+        fclass = _fclass(tags)
+        lon, lat = _lon_lat(element)
         if fclass is None or lon is None or lat is None:
             continue
 
@@ -119,7 +122,14 @@ def _read_osm_pois_from_overpass(context: dg.AssetExecutionContext) -> gpd.GeoDa
             }
         )
 
-    gdf = gpd.GeoDataFrame(rows, geometry="geometry", crs=4326)
+    # overpass can return nothing, or every element can be filtered out.
+    columns = ["osm_type", "osm_id", "name", "fclass", "geometry"]
+    return gpd.GeoDataFrame(rows, columns=columns, geometry="geometry", crs=4326)
+
+
+def _read_pois(context: dg.AssetExecutionContext) -> gpd.GeoDataFrame:
+    elements = _post_overpass(context, _overpass_query(_MONTREAL_BBOX))
+    gdf = _elements_to_points(elements)
     context.log.info(
         f"Overpass Montréal POIs: {len(gdf)} rows across "
         f"{gdf['fclass'].nunique() if not gdf.empty else 0} classes"
@@ -127,26 +137,9 @@ def _read_osm_pois_from_overpass(context: dg.AssetExecutionContext) -> gpd.GeoDa
     return gdf
 
 
-@dg.asset(group_name="raw_data", metadata=asdict(ASSET_META))
-def montreal_pois(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
-    """Query OSM POIs for the Montréal bbox, reusing the S3 snapshot while it is within the freshness window."""
-    directory = s3_datastore.asset_dir(context)
-    last = s3_datastore.latest_timestamp(directory)
-    age = None if last is None else datetime.datetime.now(datetime.timezone.utc) - last
-
-    if age is not None and age <= datetime.timedelta(days=ASSET_DATA_CONTRACT.freshness["max_days"]):
-        context.log.info(f"Using snapshot for {directory} ({age.days}d old).")
-        return s3_datastore.reemit_latest(context)
-
-    context.log.info("Downloading latest dataset")
-    data = _read_osm_pois_from_overpass(context)
-    stamp = s3_datastore.write_gpq(context, data)
-    return dg.MaterializeResult(
-        data_version=dg.DataVersion(stamp),
-        metadata={"s3_cache_hit": False},
-    )
-
-# asset checks
-pois_schema = schema_contract_factory(montreal_pois, ASSET_DATA_CONTRACT.schema)
-pois_uniqueness = row_uniqueness_factory(montreal_pois, ASSET_DATA_CONTRACT.uniqueness)
-pois_completeness = field_completeness_factory(montreal_pois, ASSET_DATA_CONTRACT.completeness)
+montreal_pois, checks = raw_geo_asset(
+    "montreal_pois",
+    ASSET_META,
+    ASSET_DATA_CONTRACT,
+    fetch=_read_pois,
+)

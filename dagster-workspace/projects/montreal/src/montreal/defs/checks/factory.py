@@ -125,6 +125,20 @@ def field_completeness_factory(
     return _check
 
 
+def standard_checks(asset: dg.AssetsDefinition, contract) -> list:
+    """Every check a data contract implies: schema, uniqueness, completeness, and
+    value_range when the contract carries ``bounds`` (gold). Returned as a list so
+    the defs autoloader unpacks it into individual checks."""
+    checks = [
+        schema_contract_factory(asset, contract.schema),
+        row_uniqueness_factory(asset, contract.uniqueness),
+        field_completeness_factory(asset, contract.completeness),
+    ]
+    if getattr(contract, "bounds", None):
+        checks.append(value_range_factory(asset, contract.bounds))
+    return checks
+
+
 def value_range_factory(asset: dg.AssetsDefinition, bounds: dict[str, tuple[float, float]]):
     """Each column stays within its inclusive ``(low, high)`` range (NaN ignored)."""
 
