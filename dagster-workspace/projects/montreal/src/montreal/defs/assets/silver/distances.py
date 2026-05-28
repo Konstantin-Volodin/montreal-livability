@@ -16,11 +16,7 @@ from montreal.defs.assets.silver.config import (
     points_with_lat_lng,
     r6_partitions,
 )
-from montreal.defs.checks.factory import (
-    field_completeness_factory,
-    row_uniqueness_factory,
-    schema_contract_factory,
-)
+from montreal.defs.checks.factory import standard_checks
 from montreal.defs.resources.lakehouse import location_of, s3_datastore
 
 # Bump to force a recompute when this asset's logic changes, even if inputs haven't.
@@ -173,6 +169,4 @@ def distances_to_amenities(context: dg.AssetExecutionContext, s3_datastore: s3_d
     return dg.MaterializeResult(data_version=dg.DataVersion(stamp) if stamp else None)
 
 # asset checks
-distances_schema = schema_contract_factory(distances_to_amenities, ASSET_DATA_CONTRACT.schema)
-distances_uniqueness = row_uniqueness_factory(distances_to_amenities, ASSET_DATA_CONTRACT.uniqueness)
-distances_completeness = field_completeness_factory(distances_to_amenities, ASSET_DATA_CONTRACT.completeness)
+checks = standard_checks(distances_to_amenities, ASSET_DATA_CONTRACT)

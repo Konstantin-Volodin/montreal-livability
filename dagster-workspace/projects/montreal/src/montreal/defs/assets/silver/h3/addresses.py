@@ -12,11 +12,7 @@ from montreal.defs.assets.silver.config import (
     h3_index,
     r6_partitions,
 )
-from montreal.defs.checks.factory import (
-    field_completeness_factory,
-    row_uniqueness_factory,
-    schema_contract_factory,
-)
+from montreal.defs.checks.factory import standard_checks
 from montreal.defs.resources.lakehouse import location_of, s3_datastore
 
 # Bump to force a recompute when this asset's logic changes, even if inputs haven't.
@@ -76,6 +72,4 @@ def h3_montreal_addresses(context: dg.AssetExecutionContext, s3_datastore: s3_da
     return dg.MaterializeResult(data_version=dg.DataVersion(stamp) if stamp else None)
 
 # asset checks
-addresses_schema = schema_contract_factory(h3_montreal_addresses, ASSET_DATA_CONTRACT.schema)
-addresses_uniqueness = row_uniqueness_factory(h3_montreal_addresses, ASSET_DATA_CONTRACT.uniqueness)
-addresses_completeness = field_completeness_factory(h3_montreal_addresses, ASSET_DATA_CONTRACT.completeness)
+checks = standard_checks(h3_montreal_addresses, ASSET_DATA_CONTRACT)

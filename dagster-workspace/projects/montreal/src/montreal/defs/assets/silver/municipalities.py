@@ -9,11 +9,7 @@ from montreal.defs.assets.silver.config import (
     SilverAssetDataContract,
     SilverAssetMetadata,
 )
-from montreal.defs.checks.factory import (
-    field_completeness_factory,
-    row_uniqueness_factory,
-    schema_contract_factory,
-)
+from montreal.defs.checks.factory import standard_checks
 from montreal.defs.resources.lakehouse import location_of, s3_datastore
 
 # metadata
@@ -48,6 +44,4 @@ def montreal_municipalities(context: dg.AssetExecutionContext, s3_datastore: s3_
     return dg.MaterializeResult(data_version=dg.DataVersion(stamp) if stamp else None)
 
 # asset checks
-municipalities_schema = schema_contract_factory(montreal_municipalities, ASSET_DATA_CONTRACT.schema)
-municipalities_uniqueness = row_uniqueness_factory(montreal_municipalities, ASSET_DATA_CONTRACT.uniqueness)
-municipalities_completeness = field_completeness_factory(montreal_municipalities, ASSET_DATA_CONTRACT.completeness)
+checks = standard_checks(montreal_municipalities, ASSET_DATA_CONTRACT)

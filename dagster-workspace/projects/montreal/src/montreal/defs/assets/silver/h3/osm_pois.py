@@ -5,16 +5,13 @@ from dataclasses import asdict
 import dagster as dg
 
 from montreal.defs.assets.bronze import montreal_pois
+from montreal.defs.assets.bronze.pois import OSM_POI_TAGS
 from montreal.defs.assets.silver.config import (
     SilverAssetDataContract,
     SilverAssetMetadata,
     h3_index,
 )
-from montreal.defs.checks.factory import (
-    field_completeness_factory,
-    row_uniqueness_factory,
-    schema_contract_factory,
-)
+from montreal.defs.checks.factory import standard_checks
 from montreal.defs.resources.lakehouse import location_of, s3_datastore
 
 # Bump to force a recompute when this asset's logic changes, even if inputs haven't.
@@ -35,10 +32,10 @@ ASSET_DATA_CONTRACT = SilverAssetDataContract(
     completeness=("geometry", "h3_r10", "category"),
 )
 
+# fclass values per category, flattened from the bronze Overpass tag map.
 _POI_CATEGORIES = {
-    "grocery": {"supermarket", "convenience", "greengrocer", "bakery", "butcher"},
-    "school": {"school", "college", "university", "kindergarten"},
-    "health": {"clinic", "hospital", "pharmacy", "doctors", "dentist"},
+    category: set().union(*tag_groups.values())
+    for category, tag_groups in OSM_POI_TAGS.items()
 }
 
 # asset
@@ -85,6 +82,4 @@ def h3_montreal_osm_pois(context: dg.AssetExecutionContext, s3_datastore: s3_dat
     return dg.MaterializeResult(data_version=dg.DataVersion(stamp) if stamp else None)
 
 # asset checks
-osm_pois_schema = schema_contract_factory(h3_montreal_osm_pois, ASSET_DATA_CONTRACT.schema)
-osm_pois_uniqueness = row_uniqueness_factory(h3_montreal_osm_pois, ASSET_DATA_CONTRACT.uniqueness)
-osm_pois_completeness = field_completeness_factory(h3_montreal_osm_pois, ASSET_DATA_CONTRACT.completeness)
+checks = standard_checks(h3_montreal_osm_pois, ASSET_DATA_CONTRACT)
