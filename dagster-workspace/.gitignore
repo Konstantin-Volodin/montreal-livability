@@ -3,3 +3,4 @@
 __pycache__/
 .env
 .dg/
+.pytest_cache/
