@@ -1,23 +1,18 @@
-"""CDK app: run the Montreal livability pipeline as a monthly Fargate batch job.
+"""Monthly Fargate batch job for the Montreal livability pipeline.
 
-Shape:
-  EventBridge Scheduler (cron, monthly)
-    -> ECS RunTask (Fargate)
-    -> one-shot container (montreal image) runs the staged pipeline
-    -> reads/writes the S3 lakehouse via the task IAM role
-    -> exits.
-
-No always-on infrastructure: you pay only for the minutes the task runs each
-month. The container image is built from the montreal project (see PROJECT_DIR)
-by CDK and pushed to ECR on deploy.
+EventBridge Scheduler -> ECS RunTask (Fargate) -> one-shot `montreal` container
+-> exits. No always-on infrastructure. See README.md for the full picture.
 """
 
 import os
+import re
 from pathlib import Path
 
 import aws_cdk as cdk
+import cdk_ecr_deployment as ecr_deployment
 from aws_cdk import (
     aws_ec2 as ec2,
+    aws_ecr as ecr,
     aws_ecr_assets as ecr_assets,
     aws_ecs as ecs,
     aws_iam as iam,
@@ -26,13 +21,24 @@ from aws_cdk import (
 )
 from constructs import Construct
 
-# Docker build context: dagster-workspace/projects/montreal. This file lives at
-# dagster-workspace/deployments/aws/app.py, so parents[2] is the workspace root.
+# Docker build context (workspace root is parents[2] from this file).
 PROJECT_DIR = Path(__file__).resolve().parents[2] / "projects" / "montreal"
 assert PROJECT_DIR.is_dir(), f"montreal project not found at {PROJECT_DIR}"
 
 
-class DagsterMonthlyJobStack(cdk.Stack):
+def _project_meta() -> tuple[str, str]:
+    """(name, version) from the montreal pyproject — used as the ECR repo + tag."""
+    text = (PROJECT_DIR / "pyproject.toml").read_text()
+    return (
+        re.search(r'(?m)^name\s*=\s*"([^"]+)"', text)[1],
+        re.search(r'(?m)^version\s*=\s*"([^"]+)"', text)[1],
+    )
+
+
+IMAGE_NAME, IMAGE_VERSION = _project_meta()
+
+
+class LivabilityStack(cdk.Stack):
     def __init__(
         self,
         scope: Construct,
@@ -41,6 +47,7 @@ class DagsterMonthlyJobStack(cdk.Stack):
         data_bucket: str,
         data_region: str,
         schedule_expression: str,
+        schedule_state: str = "ENABLED",
         cpu: int = 2048,
         memory_limit_mib: int = 8192,
         **kwargs,
@@ -48,60 +55,64 @@ class DagsterMonthlyJobStack(cdk.Stack):
         super().__init__(scope, construct_id, **kwargs)
 
         vpc, cluster = self._network()
-        task_definition = self._task_definition(
-            data_bucket, data_region, cpu=cpu, memory_limit_mib=memory_limit_mib
-        )
-        task_sg = self._schedule(vpc, cluster, task_definition, schedule_expression)
+        image = self._image()
+        task_definition = self._task_definition(image, data_bucket, data_region, cpu=cpu, memory_limit_mib=memory_limit_mib)
+        task_sg = self._schedule(vpc, cluster, task_definition, schedule_expression, schedule_state)
 
-        # Outputs are consumed by run_now.py (on-demand trigger) and a manual
-        # `aws ecs run-task`; everything that command needs is exported here.
+        # Consumed by run.py to fire an on-demand task.
         cdk.CfnOutput(self, "ClusterName", value=cluster.cluster_name)
-        cdk.CfnOutput(
-            self, "TaskDefinitionArn", value=task_definition.task_definition_arn
-        )
+        cdk.CfnOutput(self, "TaskDefinitionArn", value=task_definition.task_definition_arn)
         cdk.CfnOutput(self, "TaskSecurityGroupId", value=task_sg.security_group_id)
-        cdk.CfnOutput(
-            self,
-            "PublicSubnetIds",
-            value=",".join(s.subnet_id for s in vpc.public_subnets),
-        )
+        cdk.CfnOutput(self, "PublicSubnetIds", value=",".join(s.subnet_id for s in vpc.public_subnets),)
+
 
     def _network(self) -> tuple[ec2.Vpc, ecs.Cluster]:
-        """Public-subnet-only VPC (no NAT) + S3 gateway endpoint, and the cluster.
+        """Public-subnet VPC (no NAT) + free S3 gateway endpoint, and the cluster."""
 
-        nat_gateways=0 is the cost play; the S3 gateway endpoint lets the task
-        reach the lakehouse for free without an internet path.
-        """
         vpc = ec2.Vpc(
-            self, "DagsterVpc", max_azs=2, nat_gateways=0,
-            subnet_configuration=[
-                ec2.SubnetConfiguration(name="public", subnet_type=ec2.SubnetType.PUBLIC, cidr_mask=24)
-            ],
+            self, "LivabilityVpc", max_azs=2, nat_gateways=0,
+            subnet_configuration=[ec2.SubnetConfiguration(name="public", subnet_type=ec2.SubnetType.PUBLIC, cidr_mask=24)],
         )
         vpc.add_gateway_endpoint("S3Endpoint", service=ec2.GatewayVpcEndpointAwsService.S3)
-        cluster = ecs.Cluster(self, "DagsterCluster", vpc=vpc)
+
+        cluster = ecs.Cluster(self, "LivabilityCluster", vpc=vpc)
+
         return vpc, cluster
 
-    def _task_definition(
-        self, data_bucket: str, data_region: str, *, cpu: int, memory_limit_mib: int
-    ) -> ecs.FargateTaskDefinition:
-        """Fargate task def: the montreal image, lakehouse IAM, and CloudWatch logs."""
-        # Image built from the montreal project and pushed to ECR on deploy.
-        image = ecs.ContainerImage.from_asset(
-            str(PROJECT_DIR),
+
+    def _image(self) -> ecs.ContainerImage:
+        """Build the montreal image, then publish it to a named ECR repo as
+        `{IMAGE_NAME}:{IMAGE_VERSION}` so it's trackable (vs. CDK's content-hash tag)."""
+        asset = ecr_assets.DockerImageAsset(
+            self, "LivabilityImage",
+            directory=str(PROJECT_DIR),
             file="Dockerfile",
             platform=ecr_assets.Platform.LINUX_AMD64,
         )
+        repo = ecr.Repository(
+            self, "LivabilityRepo",
+            repository_name=IMAGE_NAME,
+            removal_policy=cdk.RemovalPolicy.DESTROY,
+            empty_on_delete=True,  # cdk destroy clears images too
+        )
+        ecr_deployment.ECRDeployment(
+            self, "LivabilityImagePush",
+            src=ecr_deployment.DockerImageName(asset.image_uri),
+            dest=ecr_deployment.DockerImageName(repo.repository_uri_for_tag(IMAGE_VERSION)),
+        )
+        return ecs.ContainerImage.from_ecr_repository(repo, tag=IMAGE_VERSION)
+
+    def _task_definition(self, image: ecs.ContainerImage, data_bucket: str, data_region: str, *, cpu: int, memory_limit_mib: int) -> ecs.FargateTaskDefinition:
+        """Fargate task def: the montreal image, lakehouse IAM, and CloudWatch logs."""
 
         task_definition = ecs.FargateTaskDefinition(
             self,
-            "DagsterTaskDef",
+            "LivabilityTask",
             cpu=cpu,
             memory_limit_mib=memory_limit_mib,
         )
 
-        # The pipeline reaches the lakehouse through the task role (boto3's
-        # default credential chain). S3 splits object ARNs (/*) from bucket ARNs.
+        # S3 needs object ARNs (/*) and bucket ARNs granted separately.
         bucket_arn = f"arn:aws:s3:::{data_bucket}"
         task_definition.task_role.add_to_principal_policy(
             iam.PolicyStatement(
@@ -117,17 +128,16 @@ class DagsterMonthlyJobStack(cdk.Stack):
         )
 
         task_definition.add_container(
-            "DagsterJob",
+            "LivabilityContainer",
             image=image,
             logging=ecs.LogDrivers.aws_logs(
-                stream_prefix="dagster-monthly",
+                stream_prefix="livability",
                 log_retention=logs.RetentionDays.ONE_MONTH,
             ),
             environment={
                 "S3_BUCKET": data_bucket,
                 "S3_REGION": data_region,
-                # Blank keys -> the s3_datastore resource falls back to the task
-                # role via boto3's default credential chain (no static secrets).
+                # Blank keys -> boto3 falls back to the task role (no static secrets).
                 "AWS_ACCESS_KEY_ID": "",
                 "AWS_SECRET_ACCESS_KEY": "",
             },
@@ -140,13 +150,13 @@ class DagsterMonthlyJobStack(cdk.Stack):
         cluster: ecs.Cluster,
         task_definition: ecs.FargateTaskDefinition,
         schedule_expression: str,
+        schedule_state: str,
     ) -> ec2.SecurityGroup:
         """Monthly EventBridge Scheduler -> ECS RunTask. Returns the task's SG."""
-        # EventBridge Scheduler assumes this role to launch the task and to pass
-        # the task/execution roles to ECS (the PassRole is easy to forget).
+        # Scheduler needs RunTask + PassRole (easy to forget) on the task roles.
         scheduler_role = iam.Role(
             self,
-            "SchedulerRole",
+            "LivabilitySchedulerRole",
             assumed_by=iam.ServicePrincipal("scheduler.amazonaws.com"),
         )
         scheduler_role.add_to_policy(
@@ -163,22 +173,17 @@ class DagsterMonthlyJobStack(cdk.Stack):
                     task_definition.task_role.role_arn,
                     task_definition.execution_role.role_arn,
                 ],
-                conditions={
-                    "StringLike": {"iam:PassedToService": "ecs-tasks.amazonaws.com"}
-                },
+                conditions={"StringLike": {"iam:PassedToService": "ecs-tasks.amazonaws.com"}},
             )
         )
 
-        task_sg = ec2.SecurityGroup(
-            self, "TaskSg", vpc=vpc, allow_all_outbound=True, description="Dagster monthly task"
-        )
+        task_sg = ec2.SecurityGroup(self, "LivabilityTaskSg", vpc=vpc, allow_all_outbound=True, description="Montreal livability monthly task")
 
         scheduler.CfnSchedule(
             self,
-            "MonthlySchedule",
-            flexible_time_window=scheduler.CfnSchedule.FlexibleTimeWindowProperty(
-                mode="OFF"
-            ),
+            "LivabilitySchedule",
+            flexible_time_window=scheduler.CfnSchedule.FlexibleTimeWindowProperty(mode="OFF"),
+            state=schedule_state,  # DISABLED pauses the monthly run; run.py still works
             schedule_expression=schedule_expression,
             schedule_expression_timezone="UTC",
             target=scheduler.CfnSchedule.TargetProperty(
@@ -196,10 +201,8 @@ class DagsterMonthlyJobStack(cdk.Stack):
                         )
                     ),
                 ),
-                # A monthly batch should not be retried into a duplicate run.
-                retry_policy=scheduler.CfnSchedule.RetryPolicyProperty(
-                    maximum_retry_attempts=0
-                ),
+                # No retries: a monthly batch shouldn't duplicate-run.
+                retry_policy=scheduler.CfnSchedule.RetryPolicyProperty(maximum_retry_attempts=0),
             ),
         )
         return task_sg
@@ -213,18 +216,16 @@ def _setting(key: str, env_var: str, default: str) -> str:
     return app.node.try_get_context(key) or os.environ.get(env_var) or default
 
 
-DagsterMonthlyJobStack(
+LivabilityStack(
     app,
-    "DagsterMonthlyJobStack",
-    data_bucket=_setting("data_bucket", "S3_BUCKET", "aws-dagster-example"),
-    data_region=_setting("data_region", "S3_REGION", "us-east-1"),
-    # 06:00 UTC on the 1st of every month (EventBridge Scheduler cron: 6 fields).
-    schedule_expression=_setting(
-        "schedule_expression", "SCHEDULE_EXPRESSION", "cron(0 6 1 * ? *)"
-    ),
+    "LivabilityStack",
+    data_bucket=_setting("data_bucket", "S3_BUCKET", "montreal-livability"),
+    data_region=_setting("data_region", "S3_REGION", "ca-central-1"),
+    schedule_expression=_setting("schedule_expression", "SCHEDULE_EXPRESSION", "cron(0 1 1 * ? *)"),
+    schedule_state=_setting("schedule_state", "SCHEDULE_STATE", "ENABLED"),
     env=cdk.Environment(
         account=os.environ.get("CDK_DEFAULT_ACCOUNT"),
-        region=os.environ.get("CDK_DEFAULT_REGION"),
+        region="ca-central-1",
     ),
 )
 app.synth()
