@@ -9,7 +9,7 @@ import zipfile
 import geopandas as gpd
 import pandas as pd
 
-from montreal.defs.assets.bronze.config import (
+from montreal.defs.assets.bronze._config import (
     BronzeAssetDataContract,
     BronzeAssetMetadata,
     raw_geo_asset,

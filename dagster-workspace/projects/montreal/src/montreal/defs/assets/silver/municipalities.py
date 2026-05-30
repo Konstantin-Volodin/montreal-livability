@@ -5,7 +5,7 @@ from dataclasses import asdict
 import dagster as dg
 
 from montreal.defs.assets.bronze import montreal_municipality_boundaries
-from montreal.defs.assets.silver.config import (
+from montreal.defs.assets.silver._config import (
     SilverAssetDataContract,
     SilverAssetMetadata,
 )

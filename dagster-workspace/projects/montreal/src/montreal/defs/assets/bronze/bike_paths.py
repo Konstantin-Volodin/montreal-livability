@@ -4,7 +4,7 @@ Montreal bike paths (réseau cyclable): fetch from donnees.montreal.ca, cache on
 
 import geopandas as gpd
 
-from montreal.defs.assets.bronze.config import (
+from montreal.defs.assets.bronze._config import (
     BronzeAssetDataContract,
     BronzeAssetMetadata,
     raw_geo_asset,

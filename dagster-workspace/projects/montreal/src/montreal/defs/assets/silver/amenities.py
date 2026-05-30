@@ -8,7 +8,7 @@ import h3
 import numpy as np
 import pandas as pd
 
-from montreal.defs.assets.silver.config import (
+from montreal.defs.assets.silver._config import (
     SilverAssetDataContract,
     SilverAssetMetadata,
     points_with_lat_lng,

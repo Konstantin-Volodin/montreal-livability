@@ -2,7 +2,7 @@
 
 Terminal HTML artifact: metadata only, no data contract or checks (the check
 factories read geoparquet). Unlike the upstream assets it has no change-detection
-skip — it re-renders every run so the report always carries a fresh "updated on"
+skip - it re-renders every run so the report always carries a fresh "updated on"
 timestamp.
 """
 

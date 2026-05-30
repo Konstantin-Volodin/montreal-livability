@@ -10,7 +10,7 @@ import dagster as dg
 import geopandas as gpd
 from shapely.geometry import Point
 
-from montreal.defs.assets.bronze.config import (
+from montreal.defs.assets.bronze._config import (
     BronzeAssetDataContract,
     BronzeAssetMetadata,
     raw_geo_asset,

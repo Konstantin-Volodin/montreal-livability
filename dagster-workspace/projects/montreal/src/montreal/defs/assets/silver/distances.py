@@ -9,7 +9,7 @@ import pandas as pd
 
 from montreal.defs.assets.silver.h3 import h3_montreal_addresses
 from montreal.defs.assets.silver.amenities import amenities
-from montreal.defs.assets.silver.config import (
+from montreal.defs.assets.silver._config import (
     POI_CATEGORIES,
     SilverAssetDataContract,
     SilverAssetMetadata,

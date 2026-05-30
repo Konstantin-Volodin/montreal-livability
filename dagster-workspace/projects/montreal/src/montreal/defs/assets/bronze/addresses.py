@@ -6,7 +6,7 @@ Addresses move only a few times a year, so the freshness window is generous.
 
 import geopandas as gpd
 
-from montreal.defs.assets.bronze.config import (
+from montreal.defs.assets.bronze._config import (
     BronzeAssetDataContract,
     BronzeAssetMetadata,
     raw_geo_asset,

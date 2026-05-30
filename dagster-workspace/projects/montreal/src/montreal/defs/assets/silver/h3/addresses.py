@@ -6,7 +6,7 @@ import dagster as dg
 import h3
 
 from montreal.defs.assets.bronze import montreal_addresses
-from montreal.defs.assets.silver.config import (
+from montreal.defs.assets.silver._config import (
     SilverAssetDataContract,
     SilverAssetMetadata,
     h3_index,
@@ -36,9 +36,10 @@ ASSET_DATA_CONTRACT = SilverAssetDataContract(
 def _reconcile_r6_partitions(context: dg.AssetExecutionContext, desired: set[str]) -> None:
     """Make the dynamic r6 partition set match ``desired``.
 
-    Runs on every materialization — including skips — because the Dagster instance
-    is ephemeral (S3 is the only durable state), so downstream partitioned consumers
-    need these partitions re-registered each run.
+    The Dagster instance is now persisted (synced to EFS around the batch), so this is
+    a cold-start / drift reconciler: it seeds the partitions on the first run against
+    fresh EFS and re-aligns them when the r6 cell set changes. Idempotent, and still
+    required so downstream partitioned consumers see the right partitions every run.
     """
     existing = set(context.instance.get_dynamic_partitions(r6_partitions.name))
     context.instance.add_dynamic_partitions(r6_partitions.name, sorted(desired - existing))
@@ -55,7 +56,7 @@ def _reconcile_r6_partitions(context: dg.AssetExecutionContext, desired: set[str
 def h3_montreal_addresses(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """H3-index addresses, shard the output by r6, and reconcile r6 partitions."""
     if s3_datastore.should_skip(context, [location_of(montreal_addresses)], code_version=CODE_VERSION):
-        # Reuse the existing shards, but still re-register their r6 partitions.
+        # Reuse the existing shards, reconciling partitions in case the cell set drifted.
         existing_shards = set(s3_datastore.shard_keys(location_of(context.assets_def)))
         _reconcile_r6_partitions(context, existing_shards)
         return s3_datastore.reemit_latest(context)

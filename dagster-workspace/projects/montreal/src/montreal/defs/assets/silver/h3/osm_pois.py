@@ -6,7 +6,7 @@ import dagster as dg
 
 from montreal.defs.assets.bronze import montreal_pois
 from montreal.defs.assets.bronze.pois import OSM_POI_TAGS
-from montreal.defs.assets.silver.config import (
+from montreal.defs.assets.silver._config import (
     SilverAssetDataContract,
     SilverAssetMetadata,
     h3_index,

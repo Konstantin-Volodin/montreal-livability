@@ -4,7 +4,7 @@ Montreal parks (espaces verts): fetch from donnees.montreal.ca, cache on S3, val
 
 import geopandas as gpd
 
-from montreal.defs.assets.bronze.config import (
+from montreal.defs.assets.bronze._config import (
     BronzeAssetDataContract,
     BronzeAssetMetadata,
     raw_geo_asset,
