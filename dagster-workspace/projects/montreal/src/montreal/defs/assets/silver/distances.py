@@ -7,6 +7,7 @@ import h3
 import numpy as np
 import pandas as pd
 
+from montreal import __version__ as CODE_VERSION
 from montreal.defs.assets.silver.h3 import h3_montreal_addresses
 from montreal.defs.assets.silver.amenities import amenities
 from montreal.defs.assets.silver._config import (
@@ -18,9 +19,6 @@ from montreal.defs.assets.silver._config import (
 )
 from montreal.defs.checks.factory import standard_checks
 from montreal.defs.resources.lakehouse import location_of, s3_datastore
-
-# Bump to force a recompute when this asset's logic changes, even if inputs haven't.
-CODE_VERSION = "1"
 
 # metadata
 ASSET_META = SilverAssetMetadata(

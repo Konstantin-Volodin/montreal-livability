@@ -5,6 +5,7 @@ from dataclasses import asdict
 import dagster as dg
 import h3
 
+from montreal import __version__ as CODE_VERSION
 from montreal.defs.assets.bronze import montreal_addresses
 from montreal.defs.assets.silver._config import (
     SilverAssetDataContract,
@@ -14,9 +15,6 @@ from montreal.defs.assets.silver._config import (
 )
 from montreal.defs.checks.factory import standard_checks
 from montreal.defs.resources.lakehouse import location_of, s3_datastore
-
-# Bump to force a recompute when this asset's logic changes, even if inputs haven't.
-CODE_VERSION = "1"
 
 # metadata
 ASSET_META = SilverAssetMetadata(

@@ -8,6 +8,7 @@ import h3
 import numpy as np
 import pandas as pd
 
+from montreal import __version__ as CODE_VERSION
 from montreal.defs.assets.silver._config import (
     SilverAssetDataContract,
     SilverAssetMetadata,
@@ -21,9 +22,6 @@ from montreal.defs.assets.silver.h3 import (
     h3_montreal_parks,
     h3_montreal_transit_stops,
 )
-
-# Bump to force a recompute when this asset's logic changes, even if inputs haven't.
-CODE_VERSION = "1"
 
 # metadata
 ASSET_META = SilverAssetMetadata(
