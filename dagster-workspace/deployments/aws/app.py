@@ -1,7 +1,6 @@
-"""Monthly Fargate batch job for the Montreal livability pipeline.
-
-EventBridge Scheduler -> ECS RunTask (Fargate) -> one-shot `montreal` container
--> exits. No always-on infrastructure. See README.md for the full picture.
+"""
+Monthly Fargate batch. No always-on infra.
+EventBridge Scheduler -> ECS RunTask -> one-shot `montreal` container -> exits. 
 """
 
 import os
@@ -18,6 +17,9 @@ from aws_cdk import (
     aws_iam as iam,
     aws_logs as logs,
     aws_scheduler as scheduler,
+    aws_sns as sns,
+    aws_sns_subscriptions as subscriptions,
+    aws_stepfunctions as sfn,
 )
 from constructs import Construct
 
@@ -33,37 +35,30 @@ def _project_meta() -> tuple[str, str]:
         re.search(r'(?m)^name\s*=\s*"([^"]+)"', text)[1],
         re.search(r'(?m)^version\s*=\s*"([^"]+)"', text)[1],
     )
-
-
 IMAGE_NAME, IMAGE_VERSION = _project_meta()
 
 
 class LivabilityStack(cdk.Stack):
     def __init__(
-        self,
-        scope: Construct,
-        construct_id: str,
+        self, scope: Construct, construct_id: str,
         *,
-        data_bucket: str,
-        data_region: str,
-        schedule_expression: str,
-        schedule_state: str = "ENABLED",
-        cpu: int = 2048,
-        memory_limit_mib: int = 8192,
+        data_bucket: str, data_region: str,
+        schedule_expression: str, schedule_state: str = "ENABLED",
+        alert_email: str = "",
+        cpu: int = 2048, memory_limit_mib: int = 8192,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
         vpc, cluster = self._network()
         image = self._image()
-        task_definition = self._task_definition(image, data_bucket, data_region, cpu=cpu, memory_limit_mib=memory_limit_mib)
-        task_sg = self._schedule(vpc, cluster, task_definition, schedule_expression, schedule_state)
+        alert_topic = self._alerts(alert_email)
+        task_definition = self._task_definition(image, data_bucket, data_region, alert_topic, cpu=cpu, memory_limit_mib=memory_limit_mib)
+        state_machine = self._state_machine(vpc, cluster, task_definition)
+        self._schedule(state_machine, schedule_expression, schedule_state)
 
-        # Consumed by run.py to fire an on-demand task.
-        cdk.CfnOutput(self, "ClusterName", value=cluster.cluster_name)
-        cdk.CfnOutput(self, "TaskDefinitionArn", value=task_definition.task_definition_arn)
-        cdk.CfnOutput(self, "TaskSecurityGroupId", value=task_sg.security_group_id)
-        cdk.CfnOutput(self, "PublicSubnetIds", value=",".join(s.subnet_id for s in vpc.public_subnets),)
+        # Consumed by run.py to fire an on-demand execution.
+        cdk.CfnOutput(self, "StateMachineArn", value=state_machine.state_machine_arn)
 
 
     def _network(self) -> tuple[ec2.Vpc, ecs.Cluster]:
@@ -74,15 +69,21 @@ class LivabilityStack(cdk.Stack):
             subnet_configuration=[ec2.SubnetConfiguration(name="public", subnet_type=ec2.SubnetType.PUBLIC, cidr_mask=24)],
         )
         vpc.add_gateway_endpoint("S3Endpoint", service=ec2.GatewayVpcEndpointAwsService.S3)
-
-        cluster = ecs.Cluster(self, "LivabilityCluster", vpc=vpc)
-
+        cluster = ecs.Cluster(self, "LivabilityCluster", vpc=vpc, enable_fargate_capacity_providers=True)
         return vpc, cluster
 
 
+    def _alerts(self, alert_email: str) -> sns.Topic:
+        """SNS topic for data-quality ERROR failures; subscribes alert_email (confirm once via email)."""
+
+        topic = sns.Topic(self, "LivabilityAlerts")
+        if alert_email: topic.add_subscription(subscriptions.EmailSubscription(alert_email))
+        return topic
+
+
     def _image(self) -> ecs.ContainerImage:
-        """Build the montreal image, then publish it to a named ECR repo as
-        `{IMAGE_NAME}:{IMAGE_VERSION}` so it's trackable (vs. CDK's content-hash tag)."""
+        """Build and publish the montreal image to ECR."""
+
         asset = ecr_assets.DockerImageAsset(
             self, "LivabilityImage",
             directory=str(PROJECT_DIR),
@@ -93,7 +94,7 @@ class LivabilityStack(cdk.Stack):
             self, "LivabilityRepo",
             repository_name=IMAGE_NAME,
             removal_policy=cdk.RemovalPolicy.DESTROY,
-            empty_on_delete=True,  # cdk destroy clears images too
+            empty_on_delete=True,
         )
         ecr_deployment.ECRDeployment(
             self, "LivabilityImagePush",
@@ -102,8 +103,8 @@ class LivabilityStack(cdk.Stack):
         )
         return ecs.ContainerImage.from_ecr_repository(repo, tag=IMAGE_VERSION)
 
-    def _task_definition(self, image: ecs.ContainerImage, data_bucket: str, data_region: str, *, cpu: int, memory_limit_mib: int) -> ecs.FargateTaskDefinition:
-        """Fargate task def: the montreal image, lakehouse IAM, and CloudWatch logs."""
+    def _task_definition(self, image: ecs.ContainerImage, data_bucket: str, data_region: str, alert_topic: sns.Topic, *, cpu: int, memory_limit_mib: int) -> ecs.FargateTaskDefinition:
+        """Fargate task def: the montreal image, lakehouse + SNS IAM, and CloudWatch logs."""
 
         task_definition = ecs.FargateTaskDefinition(
             self,
@@ -127,57 +128,96 @@ class LivabilityStack(cdk.Stack):
             )
         )
 
+        log_group = logs.LogGroup(
+            self, "LivabilityLogs",
+            log_group_name="/ecs/livability",
+            retention=logs.RetentionDays.ONE_MONTH,
+            removal_policy=cdk.RemovalPolicy.DESTROY,
+        )
         task_definition.add_container(
             "LivabilityContainer",
             image=image,
-            logging=ecs.LogDrivers.aws_logs(
-                stream_prefix="livability",
-                log_retention=logs.RetentionDays.ONE_MONTH,
-            ),
+            logging=ecs.LogDrivers.aws_logs(stream_prefix="livability", log_group=log_group),
             environment={
                 "S3_BUCKET": data_bucket,
                 "S3_REGION": data_region,
-                # Blank keys -> boto3 falls back to the task role (no static secrets).
+                "ALERT_TOPIC_ARN": alert_topic.topic_arn,
                 "AWS_ACCESS_KEY_ID": "",
                 "AWS_SECRET_ACCESS_KEY": "",
             },
         )
+        alert_topic.grant_publish(task_definition.task_role)
         return task_definition
 
-    def _schedule(
-        self,
-        vpc: ec2.Vpc,
-        cluster: ecs.Cluster,
-        task_definition: ecs.FargateTaskDefinition,
-        schedule_expression: str,
-        schedule_state: str,
-    ) -> ec2.SecurityGroup:
-        """Monthly EventBridge Scheduler -> ECS RunTask. Returns the task's SG."""
-        # Scheduler needs RunTask + PassRole (easy to forget) on the task roles.
-        scheduler_role = iam.Role(
+    def _state_machine(self, vpc: ec2.Vpc, cluster: ecs.Cluster, task_definition: ecs.FargateTaskDefinition) -> sfn.StateMachine:
+        """ecs:runTask.sync on Fargate Spot, wrapped so a Spot interruption (or any
+        non-zero exit) relaunches the task until a run completes clean. Each relaunch
+        is cheap/idempotent — the S3 cache skips already-materialized work."""
+        task_sg = ec2.SecurityGroup(self, "LivabilityTaskSg", vpc=vpc, allow_all_outbound=True, description="Montreal livability monthly task")
+
+        run_task = sfn.CustomState(
             self,
-            "LivabilitySchedulerRole",
-            assumed_by=iam.ServicePrincipal("scheduler.amazonaws.com"),
-        )
-        scheduler_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=["ecs:RunTask"],
-                resources=[task_definition.task_definition_arn],
-                conditions={"ArnLike": {"ecs:cluster": cluster.cluster_arn}},
-            )
-        )
-        scheduler_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=["iam:PassRole"],
-                resources=[
-                    task_definition.task_role.role_arn,
-                    task_definition.execution_role.role_arn,
-                ],
-                conditions={"StringLike": {"iam:PassedToService": "ecs-tasks.amazonaws.com"}},
-            )
+            "RunLivability",
+            state_json={
+                "Type": "Task",
+                "Resource": "arn:aws:states:::ecs:runTask.sync",
+                "Parameters": {
+                    "Cluster": cluster.cluster_arn,
+                    "TaskDefinition": task_definition.task_definition_arn,
+                    "CapacityProviderStrategy": [{"CapacityProvider": "FARGATE_SPOT", "Weight": 1}],
+                    "NetworkConfiguration": {
+                        "AwsvpcConfiguration": {
+                            "Subnets": [s.subnet_id for s in vpc.public_subnets],
+                            "SecurityGroups": [task_sg.security_group_id],
+                            "AssignPublicIp": "ENABLED",
+                        }
+                    },
+                },
+                # Spot interruption surfaces as States.TaskFailed; relaunch up to 10x.
+                # 10 straight Spot kills in one monthly run is effectively nil.
+                "Retry": [{
+                    "ErrorEquals": ["States.TaskFailed", "States.Timeout"],
+                    "IntervalSeconds": 30, "MaxAttempts": 10, "BackoffRate": 1.5,
+                }],
+            },
         )
 
-        task_sg = ec2.SecurityGroup(self, "LivabilityTaskSg", vpc=vpc, allow_all_outbound=True, description="Montreal livability monthly task")
+        state_machine = sfn.StateMachine(
+            self,
+            "LivabilityStateMachine",
+            definition_body=sfn.DefinitionBody.from_chainable(run_task),
+            timeout=cdk.Duration.hours(6),
+        )
+
+        # CustomState gets none of the auto-IAM the L2 EcsRunTask would add, so grant it
+        # by hand: RunTask + the lifecycle/PassRole perms .sync needs, plus the managed
+        # EventBridge rule it uses to wait for the task to finish.
+        role = state_machine.role
+        role.add_to_principal_policy(iam.PolicyStatement(
+            actions=["ecs:RunTask"], resources=[task_definition.task_definition_arn],
+            conditions={"ArnLike": {"ecs:cluster": cluster.cluster_arn}},
+        ))
+        role.add_to_principal_policy(iam.PolicyStatement(
+            actions=["ecs:StopTask", "ecs:DescribeTasks"], resources=["*"],
+        ))
+        role.add_to_principal_policy(iam.PolicyStatement(
+            actions=["iam:PassRole"],
+            resources=[task_definition.task_role.role_arn, task_definition.execution_role.role_arn],
+            conditions={"StringLike": {"iam:PassedToService": "ecs-tasks.amazonaws.com"}},
+        ))
+        role.add_to_principal_policy(iam.PolicyStatement(
+            actions=["events:PutTargets", "events:PutRule", "events:DescribeRule"],
+            resources=[f"arn:aws:events:{self.region}:{self.account}:rule/StepFunctionsGetEventsForECSTaskRule"],
+        ))
+        return state_machine
+
+    def _schedule(self, state_machine: sfn.StateMachine, schedule_expression: str, schedule_state: str) -> None:
+        """Monthly EventBridge Scheduler -> Step Functions StartExecution (the state
+        machine owns task launch + Spot retries)."""
+        scheduler_role = iam.Role(self, "LivabilitySchedulerRole", assumed_by=iam.ServicePrincipal("scheduler.amazonaws.com"))
+        scheduler_role.add_to_policy(iam.PolicyStatement(
+            actions=["states:StartExecution"], resources=[state_machine.state_machine_arn],
+        ))
 
         scheduler.CfnSchedule(
             self,
@@ -187,25 +227,12 @@ class LivabilityStack(cdk.Stack):
             schedule_expression=schedule_expression,
             schedule_expression_timezone="UTC",
             target=scheduler.CfnSchedule.TargetProperty(
-                arn=cluster.cluster_arn,
+                arn=state_machine.state_machine_arn,
                 role_arn=scheduler_role.role_arn,
-                ecs_parameters=scheduler.CfnSchedule.EcsParametersProperty(
-                    task_definition_arn=task_definition.task_definition_arn,
-                    launch_type="FARGATE",
-                    task_count=1,
-                    network_configuration=scheduler.CfnSchedule.NetworkConfigurationProperty(
-                        awsvpc_configuration=scheduler.CfnSchedule.AwsVpcConfigurationProperty(
-                            subnets=[s.subnet_id for s in vpc.public_subnets],
-                            security_groups=[task_sg.security_group_id],
-                            assign_public_ip="ENABLED",
-                        )
-                    ),
-                ),
-                # No retries: a monthly batch shouldn't duplicate-run.
+                # No scheduler-level retry: the state machine handles relaunches.
                 retry_policy=scheduler.CfnSchedule.RetryPolicyProperty(maximum_retry_attempts=0),
             ),
         )
-        return task_sg
 
 
 app = cdk.App()
@@ -223,6 +250,7 @@ LivabilityStack(
     data_region=_setting("data_region", "S3_REGION", "ca-central-1"),
     schedule_expression=_setting("schedule_expression", "SCHEDULE_EXPRESSION", "cron(0 1 1 * ? *)"),
     schedule_state=_setting("schedule_state", "SCHEDULE_STATE", "ENABLED"),
+    alert_email=_setting("alert_email", "ALERT_EMAIL", "volodin.kostia@gmail.com"),
     env=cdk.Environment(
         account=os.environ.get("CDK_DEFAULT_ACCOUNT"),
         region="ca-central-1",

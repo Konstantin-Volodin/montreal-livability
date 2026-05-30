@@ -17,7 +17,8 @@ from montreal.defs.assets.silver.config import (
     points_with_lat_lng,
     r6_partitions,
 )
-from montreal.defs.assets.silver.distances import haversine, nearest
+from montreal.defs.assets.silver.distances import distances_to_amenities, haversine, nearest
+from montreal.defs.checks.factory import _read_checked
 from montreal.defs.assets.silver.h3 import (
     addresses as h3_addresses,
     bike_paths as h3_bike_paths,
@@ -123,6 +124,43 @@ def test_amenity_frame_keeps_own_category_when_none_given():
 def test_amenity_frame_overrides_category_when_given():
     out = amenities._amenity_frame(_candidate_frame(), "transit")
     assert (out["category"] == "transit").all()
+
+
+# --- partitioned-asset checks read one shard ------------------------------
+
+
+class _RecordingStore:
+    """Records which read the check routed to, standing in for s3_datastore."""
+
+    def __init__(self):
+        self.reads: list[tuple[str, str]] = []
+
+    def read_gpq(self, context, address):
+        self.reads.append(("read_gpq", address))
+
+    def read_gpq_prefix(self, context, prefix):
+        self.reads.append(("read_gpq_prefix", prefix))
+
+
+class _Ctx:
+    def __init__(self, partition_key=None):
+        self.has_partition_key = partition_key is not None
+        self.partition_key = partition_key
+
+
+def test_partitioned_check_reads_only_its_partition_shard():
+    # distances_to_amenities is r6-partitioned: a check run scoped to one partition
+    # must validate just that partition's shard, not concat every shard.
+    store = _RecordingStore()
+    _read_checked(_Ctx(partition_key="861f1d8c7"), store, distances_to_amenities)
+    assert store.reads == [("read_gpq", "silver/distances_to_amenities/861f1d8c7")]
+
+
+def test_unpartitioned_sharded_check_reads_all_shards():
+    # No partition scope + a sharded asset (segmentation=h3_r6) -> one pass over every shard.
+    store = _RecordingStore()
+    _read_checked(_Ctx(), store, distances_to_amenities)
+    assert store.reads == [("read_gpq_prefix", "silver/distances_to_amenities")]
 
 
 # --- per-module contract sanity -------------------------------------------

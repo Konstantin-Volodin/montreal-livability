@@ -31,13 +31,17 @@ def _dtype_matches(series: pd.Series, kind: str) -> bool:
     raise ValueError(f"Unknown schema kind {kind!r}")
 
 
-def _read_whole(context, s3_datastore, asset: dg.AssetsDefinition):
-    """Read an asset's full dataset, concatenating shards for sharded (partitioned) assets.
+def _read_checked(context, s3_datastore, asset: dg.AssetsDefinition):
+    """Read the data this check run covers.
 
-    Sharded assets (metadata ``segmentation`` set to a column, e.g. ``h3_r6``) have no
-    single snapshot at their base dir, so they are read across all per-shard subdirs.
+    A Dagster-partitioned asset runs its checks per-partition, so read only that
+    partition's shard. A sharded-but-unpartitioned asset (``segmentation`` set to a
+    column, e.g. ``h3_r6``) has no single snapshot, so concat its per-shard subdirs.
+    Everything else is one snapshot at the base dir.
     """
     location = location_of(asset)
+    if context.has_partition_key:
+        return s3_datastore.read_gpq(context, f"{location}/{context.partition_key}")
     segmentation = asset.metadata_by_key[asset.key].get("segmentation")
     if segmentation in (None, "snapshot"):
         return s3_datastore.read_gpq(context, location)
@@ -152,7 +156,7 @@ def standard_checks(asset: dg.AssetsDefinition, contract) -> list:
 
     @dg.multi_asset_check(specs=specs, name=f"{asset.key.path[-1]}_contract_checks")
     def _checks(context: dg.AssetCheckExecutionContext, s3_datastore: s3_datastore):
-        df = _read_whole(context, s3_datastore, asset)
+        df = _read_checked(context, s3_datastore, asset)
         location = location_of(asset)
         results = [
             _schema_contract_result(df, contract.schema),
