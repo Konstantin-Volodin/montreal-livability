@@ -22,12 +22,9 @@ from montreal.defs.resources.lakehouse import location_of, s3_datastore
 
 def _dtype_matches(series: pd.Series, kind: str) -> bool:
     """Whether a column's dtype matches a contract kind."""
-    if kind == "numeric":
-        return pd.api.types.is_numeric_dtype(series)
-    if kind == "str":
-        return pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)
-    if kind == "geometry":
-        return str(series.dtype) == "geometry"
+    if kind == "numeric": return pd.api.types.is_numeric_dtype(series)
+    if kind == "str": return pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)
+    if kind == "geometry": return str(series.dtype) == "geometry"
     raise ValueError(f"Unknown schema kind {kind!r}")
 
 
@@ -40,7 +37,7 @@ def _read_checked(context, s3_datastore, asset: dg.AssetsDefinition):
     Everything else is one snapshot at the base dir.
     """
     location = location_of(asset)
-    if context.has_partition_key:
+    if context.has_partition_key: 
         return s3_datastore.read_gpq(context, f"{location}/{context.partition_key}")
     segmentation = asset.metadata_by_key[asset.key].get("segmentation")
     if segmentation in (None, "snapshot"):
@@ -140,8 +137,8 @@ def _value_range_result(df, bounds: dict[str, tuple[float, float]]) -> dg.AssetC
 
 
 def standard_checks(asset: dg.AssetsDefinition, contract) -> list:
-    """Every check a data contract implies — schema, uniqueness, completeness, and
-    value_range when the contract carries ``bounds`` (gold) — as a single multi-check
+    """Every check a data contract implies - schema, uniqueness, completeness, and
+    value_range when the contract carries ``bounds`` (gold) - as a single multi-check
     that reads the asset once. Returned as a one-element list so the defs autoloader
     unpacks it, keeping every ``standard_checks(...)`` call site unchanged."""
     bounds = getattr(contract, "bounds", None)

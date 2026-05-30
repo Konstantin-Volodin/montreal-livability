@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from shapely.geometry import Point
 
+from montreal import __version__ as CODE_VERSION
 from montreal.defs.assets.gold.config import (
     DEFAULT_WEIGHTS,
     SCORE_COLUMNS,
@@ -21,9 +22,6 @@ from montreal.defs.assets.silver.municipalities import montreal_municipalities
 from montreal.defs.assets.silver.distances import distances_to_amenities
 from montreal.defs.checks.factory import standard_checks
 from montreal.defs.resources.lakehouse import location_of, s3_datastore
-
-# Bump to force a recompute when this asset's logic changes, even if inputs haven't.
-CODE_VERSION = "1"
 
 _SCORE_CURVE = ((100.0, 100.0), (500.0, 50.0), (1000.0, 20.0))
 
