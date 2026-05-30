@@ -14,7 +14,7 @@ from montreal.defs.assets.silver._config import (
     r6_partitions,
 )
 from montreal.defs.checks.factory import standard_checks
-from montreal.defs.resources.lakehouse import location_of, s3_datastore
+from montreal.defs.resources.lakehouse import location_of, s3_datastore, skip
 
 # metadata
 ASSET_META = SilverAssetMetadata(
@@ -53,11 +53,11 @@ def _reconcile_r6_partitions(context: dg.AssetExecutionContext, desired: set[str
 @dg.asset(group_name="H3_indexed", metadata=asdict(ASSET_META), deps=[montreal_addresses], code_version=CODE_VERSION)
 def h3_montreal_addresses(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """H3-index addresses, shard the output by r6, and reconcile r6 partitions."""
-    if s3_datastore.should_skip(context, [location_of(montreal_addresses)], code_version=CODE_VERSION):
+    if skip.should_skip(s3_datastore, context, [location_of(montreal_addresses)], code_version=CODE_VERSION):
         # Reuse the existing shards, reconciling partitions in case the cell set drifted.
         existing_shards = set(s3_datastore.shard_keys(location_of(context.assets_def)))
         _reconcile_r6_partitions(context, existing_shards)
-        return s3_datastore.reemit_latest(context)
+        return skip.reemit_latest(s3_datastore, context)
 
     gdf = s3_datastore.read_gpq(context, location_of(montreal_addresses))
     gdf = h3_index(gdf)

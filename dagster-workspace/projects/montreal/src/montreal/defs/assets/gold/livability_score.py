@@ -21,7 +21,7 @@ from montreal.defs.assets.silver.config import POI_CATEGORIES
 from montreal.defs.assets.silver.municipalities import montreal_municipalities
 from montreal.defs.assets.silver.distances import distances_to_amenities
 from montreal.defs.checks.factory import standard_checks
-from montreal.defs.resources.lakehouse import location_of, s3_datastore
+from montreal.defs.resources.lakehouse import location_of, s3_datastore, skip
 
 _SCORE_CURVE = ((100.0, 100.0), (500.0, 50.0), (1000.0, 20.0))
 
@@ -94,8 +94,8 @@ def livability_score(
         (location_of(distances_to_amenities), True),  # all r6 distance shards
         location_of(montreal_municipalities),
     ]
-    if s3_datastore.should_skip(context, upstreams, code_version=CODE_VERSION):
-        return s3_datastore.reemit_latest(context)
+    if skip.should_skip(s3_datastore, context, upstreams, code_version=CODE_VERSION):
+        return skip.reemit_latest(s3_datastore, context)
 
     distances = s3_datastore.read_gpq_prefix(context, location_of(distances_to_amenities))
     boundaries = s3_datastore.read_gpq(context, location_of(montreal_municipalities))

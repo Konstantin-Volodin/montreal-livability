@@ -12,7 +12,7 @@ from montreal.defs.assets.silver._config import (
     h3_index,
 )
 from montreal.defs.checks.factory import standard_checks
-from montreal.defs.resources.lakehouse import location_of, s3_datastore
+from montreal.defs.resources.lakehouse import location_of, s3_datastore, skip
 
 # metadata
 ASSET_META = SilverAssetMetadata(
@@ -33,8 +33,8 @@ ASSET_DATA_CONTRACT = SilverAssetDataContract(
 @dg.asset(group_name="H3_indexed", metadata=asdict(ASSET_META), deps=[montreal_transit_stops], code_version=CODE_VERSION)
 def h3_montreal_transit_stops(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """apply h3 indexing to the montreal_transit_stops asset; add the h3_r10 analysis column"""
-    if s3_datastore.should_skip(context, [location_of(montreal_transit_stops)], code_version=CODE_VERSION):
-        return s3_datastore.reemit_latest(context)
+    if skip.should_skip(s3_datastore, context, [location_of(montreal_transit_stops)], code_version=CODE_VERSION):
+        return skip.reemit_latest(s3_datastore, context)
 
     gdf = s3_datastore.read_gpq(context, location_of(montreal_transit_stops))
     gdf = h3_index(gdf)

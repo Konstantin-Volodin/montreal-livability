@@ -10,10 +10,13 @@ import dagster as dg
 import geopandas as gpd
 import pandas as pd
 from shapely.geometry import Point
+from upath import UPath
 
 from montreal.defs.assets.bronze import montreal_pois
 from montreal.defs.assets.silver.amenities import amenities
-from montreal.defs.resources.lakehouse import format_size, location_of, s3_datastore
+from montreal.defs.resources.lakehouse import format_size, location_of, s3_datastore, skip
+from montreal.defs.resources.lakehouse.frames import preview, read_parquet_bytes, to_wgs84
+from montreal.defs.resources.lakehouse.paths import now_stamp
 
 OLD = "20240101T000000_000000Z"
 NEW = "20240601T000000_000000Z"
@@ -32,54 +35,45 @@ def test_format_size_renders_megabytes():
 
 
 def test_now_stamp_is_a_sortable_fixed_width_utc_string():
-    assert re.fullmatch(r"\d{8}T\d{6}_\d{6}Z", s3_datastore._now_stamp())
+    assert re.fullmatch(r"\d{8}T\d{6}_\d{6}Z", now_stamp())
 
 
 def test_to_wgs84_normalizes_crs_and_passes_non_geo_through():
     # missing crs is assumed to be 4326.
     no_crs = gpd.GeoDataFrame(geometry=[Point(-73.6, 45.5)])
-    assert s3_datastore._to_wgs84(no_crs).crs.to_epsg() == 4326
+    assert to_wgs84(no_crs).crs.to_epsg() == 4326
 
     # a projected frame is reprojected.
     projected = gpd.GeoDataFrame(geometry=[Point(-8_190_000, 5_690_000)], crs=3857)
-    assert s3_datastore._to_wgs84(projected).crs.to_epsg() == 4326
+    assert to_wgs84(projected).crs.to_epsg() == 4326
 
     # a plain DataFrame is returned untouched.
     plain = pd.DataFrame({"a": [1]})
-    assert s3_datastore._to_wgs84(plain) is plain
+    assert to_wgs84(plain) is plain
 
 
 def test_read_parquet_bytes_falls_back_to_pandas_without_geometry():
     geo = gpd.GeoDataFrame({"a": [1]}, geometry=[Point(0, 0)], crs=4326)
     buf = io.BytesIO()
     geo.to_parquet(buf)
-    assert isinstance(s3_datastore._read_parquet_bytes(buf.getvalue()), gpd.GeoDataFrame)
+    assert isinstance(read_parquet_bytes(buf.getvalue()), gpd.GeoDataFrame)
 
     tabular = pd.DataFrame({"a": [1, 2]})
     buf = io.BytesIO()
     tabular.to_parquet(buf)
-    out = s3_datastore._read_parquet_bytes(buf.getvalue())
+    out = read_parquet_bytes(buf.getvalue())
     assert isinstance(out, pd.DataFrame) and not isinstance(out, gpd.GeoDataFrame)
 
 
-def test_gpq_preview_drops_geometry():
-    store = s3_datastore(bucket_name="b", region_name="r")
+def test_preview_drops_geometry():
     geo = gpd.GeoDataFrame({"name": ["x"]}, geometry=[Point(0, 0)], crs=4326)
-    preview = store.gpq_preview(geo)
-    assert "name" in preview and "geometry" not in preview
-
-
-class _FakeS3:
-    def __init__(self):
-        self.puts = []
-
-    def put_object(self, **kwargs):
-        self.puts.append(kwargs)
+    md = preview(geo)
+    assert "name" in md and "geometry" not in md
 
 
 def test_write_check_result_persists_normalized_json():
     store = s3_datastore(bucket_name="b", region_name="r")
-    store._s3 = _FakeS3()
+    store._base = UPath("memory://lakehouse/")  # in-process fsspec backend, no S3 needed
     result = dg.AssetCheckResult(
         passed=False,
         severity=dg.AssetCheckSeverity.ERROR,
@@ -87,9 +81,8 @@ def test_write_check_result_persists_normalized_json():
     )
     store.write_check_result(_Ctx(), "silver/amenities", "row_uniqueness", result)
 
-    put = store._s3.puts[0]
-    assert put["Key"] == "silver/amenities/_checks/row_uniqueness.json"
-    payload = json.loads(put["Body"])
+    written = (store._base / "silver/amenities/_checks/row_uniqueness.json").read_text()
+    payload = json.loads(written)
     assert payload["passed"] is False and payload["severity"] == "ERROR"
     # MetadataValue and raw values both land as plain JSON.
     assert payload["metadata"]["duplicate_rows"] == 3
@@ -139,30 +132,30 @@ def _store(**kwargs) -> SkipStore:
 
 def test_skip_false_when_asset_has_no_output_yet():
     store = _store(own_stamp=None)
-    assert store.should_skip(_Ctx(), ["bronze/x"], code_version="1") is False
+    assert skip.should_skip(store, _Ctx(),["bronze/x"], code_version="1") is False
 
 
 def test_skip_false_when_code_version_changed():
     store = _store(own_stamp=NEW, provenance_version="0", upstream_stamps={"bronze/x": OLD})
-    assert store.should_skip(_Ctx(), ["bronze/x"], code_version="1") is False
+    assert skip.should_skip(store, _Ctx(),["bronze/x"], code_version="1") is False
 
 
 def test_skip_false_when_an_upstream_is_missing():
     store = _store(own_stamp=NEW, provenance_version="1", upstream_stamps={"bronze/x": None})
-    assert store.should_skip(_Ctx(), ["bronze/x"], code_version="1") is False
+    assert skip.should_skip(store, _Ctx(),["bronze/x"], code_version="1") is False
 
 
 def test_skip_false_when_an_upstream_is_newer():
     store = _store(own_stamp=OLD, provenance_version="1", upstream_stamps={"bronze/x": NEW})
-    assert store.should_skip(_Ctx(), ["bronze/x"], code_version="1") is False
+    assert skip.should_skip(store, _Ctx(),["bronze/x"], code_version="1") is False
 
 
 def test_skip_true_when_inputs_unchanged():
     store = _store(own_stamp=NEW, provenance_version="1", upstream_stamps={"bronze/x": OLD})
-    assert store.should_skip(_Ctx(), ["bronze/x"], code_version="1") is True
+    assert skip.should_skip(store, _Ctx(),["bronze/x"], code_version="1") is True
 
 
 def test_skip_handles_prefix_upstreams_via_shard_max():
     # a (directory, is_prefix=True) entry takes the newest stamp across shards.
     store = _store(own_stamp=NEW, provenance_version="1", upstream_stamps={"silver/sharded": OLD})
-    assert store.should_skip(_Ctx(), [("silver/sharded", True)], code_version="1") is True
+    assert skip.should_skip(store, _Ctx(),[("silver/sharded", True)], code_version="1") is True

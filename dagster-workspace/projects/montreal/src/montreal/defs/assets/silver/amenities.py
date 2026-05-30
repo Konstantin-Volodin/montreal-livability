@@ -15,7 +15,7 @@ from montreal.defs.assets.silver._config import (
     points_with_lat_lng,
 )
 from montreal.defs.checks.factory import standard_checks
-from montreal.defs.resources.lakehouse import location_of, s3_datastore
+from montreal.defs.resources.lakehouse import location_of, s3_datastore, skip
 from montreal.defs.assets.silver.h3 import (
     h3_montreal_bike_paths,
     h3_montreal_osm_pois,
@@ -65,8 +65,8 @@ def amenities(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> 
         location_of(h3_montreal_parks),
         location_of(h3_montreal_bike_paths),
     ]
-    if s3_datastore.should_skip(context, upstreams, code_version=CODE_VERSION):
-        return s3_datastore.reemit_latest(context)
+    if skip.should_skip(s3_datastore, context, upstreams, code_version=CODE_VERSION):
+        return skip.reemit_latest(s3_datastore, context)
 
     # read data
     osm_pois = s3_datastore.read_gpq(context, location_of(h3_montreal_osm_pois))

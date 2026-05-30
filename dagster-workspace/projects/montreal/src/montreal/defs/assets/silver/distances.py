@@ -18,7 +18,7 @@ from montreal.defs.assets.silver._config import (
     r6_partitions,
 )
 from montreal.defs.checks.factory import standard_checks
-from montreal.defs.resources.lakehouse import location_of, s3_datastore
+from montreal.defs.resources.lakehouse import location_of, s3_datastore, skip
 
 # metadata
 ASSET_META = SilverAssetMetadata(
@@ -131,8 +131,8 @@ def distances_to_amenities(context: dg.AssetExecutionContext, s3_datastore: s3_d
         f"{location_of(h3_montreal_addresses)}/{context.partition_key}",  # this partition's r6 shard
         location_of(amenities),
     ]
-    if s3_datastore.should_skip(context, upstreams, code_version=CODE_VERSION):
-        return s3_datastore.reemit_latest(context)
+    if skip.should_skip(s3_datastore, context, upstreams, code_version=CODE_VERSION):
+        return skip.reemit_latest(s3_datastore, context)
 
     addresses = s3_datastore.read_gpq(context, f"{location_of(h3_montreal_addresses)}/{context.partition_key}")
     amenity_points = s3_datastore.read_gpq(context, location_of(amenities))
