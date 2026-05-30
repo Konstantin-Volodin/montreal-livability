@@ -2,6 +2,7 @@
 
 import io
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -9,17 +10,22 @@ import boto3
 import dagster as dg
 import geopandas as gpd
 import pandas as pd
+from botocore.config import Config
 from pydantic import PrivateAttr
 from upath import UPath
 
-# Sibling object in every snapshot directory; its body is the key of the
-# newest ``*.parquet`` snapshot, so reads resolve "latest" with one GET.
-_POINTER = "_latest"
+# Threads used to read a sharded asset's per-shard snapshots in parallel; also the
+# S3 client's connection-pool size, so concurrent GETs never queue on the pool.
+_READ_WORKERS = 16
 
-# Sibling JSON recording what produced a directory's latest output (currently
-# the asset's ``code_version``), so a logic change forces a recompute even when
-# the upstream data is byte-for-byte unchanged. See ``should_skip``.
-_PROVENANCE = "_provenance"
+# Per-directory JSON, rewritten on each output: {key, code_version}. `key` names
+# the newest snapshot (None at a sharded asset's base dir); `code_version` lets a
+# logic change force a recompute. One GET, always consistent. See `should_skip`.
+_MANIFEST = "_manifest"
+
+# Subdir under an asset dir holding one JSON per check result. Written as each check
+# runs so results outlive the throwaway instance; batch.py reads them into a run report.
+_CHECKS_DIR = "_checks"
 
 
 def format_size(size_bytes: int) -> str:
@@ -54,6 +60,7 @@ class s3_datastore(dg.ConfigurableResource):
             region_name=self.region_name,
             aws_access_key_id=self.aws_access_key_id or None,
             aws_secret_access_key=self.aws_secret_access_key or None,
+            config=Config(max_pool_connections=_READ_WORKERS),
         )
         self._base_path = UPath(f"s3://{self.bucket_name}/")
         context.log.info(
@@ -71,21 +78,36 @@ class s3_datastore(dg.ConfigurableResource):
         """Sortable UTC stamp used as both the snapshot filename and data version."""
         return f"{datetime.now(timezone.utc):%Y%m%dT%H%M%S_%f}Z"
 
-    def _put_snapshot(self, directory: str, buffer: io.BytesIO, stamp: str) -> str:
-        """Upload a snapshot under ``directory`` at ``stamp`` and repoint ``_latest``."""
-        key = f"{directory}/{stamp}.parquet"
-        self._s3.upload_fileobj(buffer, self.bucket_name, key)
+    def _write_manifest(self, directory: str, key: Optional[str], code_version: Optional[str]) -> None:
+        """Rewrite a directory's manifest: latest snapshot key + the code_version that produced it."""
         self._s3.put_object(
             Bucket=self.bucket_name,
-            Key=f"{directory}/{_POINTER}",
-            Body=key.encode("utf-8"),
+            Key=f"{directory}/{_MANIFEST}",
+            Body=json.dumps({"key": key, "code_version": code_version}).encode("utf-8"),
         )
+
+    def _read_manifest(self, directory: str) -> Optional[dict]:
+        """A directory's manifest dict, or None if it was never written / is unreadable."""
+        try:
+            obj = self._s3.get_object(Bucket=self.bucket_name, Key=f"{directory}/{_MANIFEST}")
+        except self._s3.exceptions.ClientError:
+            return None
+        try:
+            return json.loads(obj["Body"].read().decode("utf-8"))
+        except ValueError:
+            return None
+
+    def _put_snapshot(self, directory: str, buffer: io.BytesIO, stamp: str, code_version: Optional[str] = None) -> str:
+        """Upload a snapshot under ``directory`` at ``stamp`` and rewrite the directory manifest."""
+        key = f"{directory}/{stamp}.parquet"
+        self._s3.upload_fileobj(buffer, self.bucket_name, key)
+        self._write_manifest(directory, key, code_version)
         return key
 
     def _resolve_latest(self, directory: str) -> str:
-        """Return the snapshot key the directory's ``_latest`` pointer names."""
-        obj = self._s3.get_object(Bucket=self.bucket_name, Key=f"{directory}/{_POINTER}")
-        return obj["Body"].read().decode("utf-8")
+        """Snapshot key named by the directory's manifest (raises ClientError if the dir has none)."""
+        obj = self._s3.get_object(Bucket=self.bucket_name, Key=f"{directory}/{_MANIFEST}")
+        return json.loads(obj["Body"].read().decode("utf-8"))["key"]
 
     def latest_stamp(self, directory: str) -> Optional[str]:
         """Raw sortable stamp of the directory's latest snapshot, or None if absent.
@@ -94,11 +116,9 @@ class s3_datastore(dg.ConfigurableResource):
         lexicographically — comparing two stamps as plain strings is a valid
         "which is newer" test, which is what the change-detection skip relies on.
         """
-        try:
-            key = self._resolve_latest(directory)
-        except self._s3.exceptions.ClientError:
-            return None
-        return key.rsplit("/", 1)[-1].removesuffix(".parquet")
+        manifest = self._read_manifest(directory)
+        key = manifest.get("key") if manifest else None
+        return key.rsplit("/", 1)[-1].removesuffix(".parquet") if key else None
 
     def latest_timestamp(self, directory: str) -> Optional[datetime]:
         """Parse the timestamp of the directory's latest snapshot, or None if absent."""
@@ -131,25 +151,6 @@ class s3_datastore(dg.ConfigurableResource):
         """Newest stamp across every per-shard subdir under ``prefix`` (None if no shards)."""
         stamps = [s for s in (self.latest_stamp(d) for d in self._shard_dirs(prefix)) if s]
         return max(stamps) if stamps else None
-
-    def _write_provenance(self, directory: str, code_version: Optional[str]) -> None:
-        """Record what produced this directory's latest output (alongside ``_latest``)."""
-        self._s3.put_object(
-            Bucket=self.bucket_name,
-            Key=f"{directory}/{_PROVENANCE}",
-            Body=json.dumps({"code_version": code_version}).encode("utf-8"),
-        )
-
-    def read_provenance(self, directory: str) -> Optional[dict]:
-        """The directory's provenance record, or None if it was never written."""
-        try:
-            obj = self._s3.get_object(Bucket=self.bucket_name, Key=f"{directory}/{_PROVENANCE}")
-        except self._s3.exceptions.ClientError:
-            return None
-        try:
-            return json.loads(obj["Body"].read().decode("utf-8"))
-        except ValueError:
-            return None
 
     @staticmethod
     def _to_wgs84(gdf):
@@ -235,7 +236,7 @@ class s3_datastore(dg.ConfigurableResource):
         if mine is None:
             return False
 
-        provenance = self.read_provenance(self._own_dir(context)) or {}
+        provenance = self._read_manifest(self._own_dir(context)) or {}
         if provenance.get("code_version") != code_version:
             context.log.info(
                 f"code_version changed ({provenance.get('code_version')!r} -> {code_version!r}); recomputing."
@@ -259,8 +260,8 @@ class s3_datastore(dg.ConfigurableResource):
     def reemit_latest(self, context) -> dg.MaterializeResult:
         """Re-emit the existing output: stable DataVersion + cache-hit metadata, no S3 write.
 
-        ``_latest`` still points at the valid snapshot, so downstream reads keep
-        working; re-emitting the same DataVersion means no spurious invalidation.
+        The manifest still names a valid snapshot, so downstream reads keep working;
+        re-emitting the same DataVersion means no spurious invalidation.
         """
         stamp = self.output_stamp(context)
         try:
@@ -269,7 +270,7 @@ class s3_datastore(dg.ConfigurableResource):
             elif context.assets_def.metadata_by_key[context.asset_key].get("segmentation") in (None, "snapshot"):
                 self.describe_latest(context, location_of(context.assets_def))
         except self._s3.exceptions.ClientError:
-            pass  # sharded base dir has no single _latest; the stable DataVersion is enough
+            pass  # sharded base dir has no snapshot of its own; the stable DataVersion is enough
         return dg.MaterializeResult(
             data_version=dg.DataVersion(stamp) if stamp else None,
             metadata={"skipped_unchanged": dg.MetadataValue.bool(True)},
@@ -301,8 +302,7 @@ class s3_datastore(dg.ConfigurableResource):
 
         stamp = self._now_stamp()
         directory = self.asset_dir(context, shard)
-        s3_key = self._put_snapshot(directory, buffer, stamp)
-        self._write_provenance(directory, code_version)
+        s3_key = self._put_snapshot(directory, buffer, stamp, code_version)
         s3_path = self._base_path / s3_key
         context.log.info(f"Wrote snapshot {s3_path}")
 
@@ -322,11 +322,11 @@ class s3_datastore(dg.ConfigurableResource):
             buffer = io.BytesIO()
             group.to_parquet(buffer, engine="pyarrow", index=False, compression="snappy")
             buffer.seek(0)
-            self._put_snapshot(self.asset_dir(context, str(value)), buffer, stamp)
+            self._put_snapshot(self.asset_dir(context, str(value)), buffer, stamp, code_version)
             written += 1
 
-        # One provenance record at the base dir covers the whole sharded asset.
-        self._write_provenance(self.asset_dir(context), code_version)
+        # Base-dir manifest (no snapshot of its own) carries the code_version for the whole sharded asset.
+        self._write_manifest(self.asset_dir(context), None, code_version)
 
         context.log.info(f"write_gpq_partitioned: {written} snapshots under {self.asset_dir(context)}/ keyed by '{column}'")
         context.add_output_metadata(
@@ -363,11 +363,15 @@ class s3_datastore(dg.ConfigurableResource):
         if not subdirs:
             raise FileNotFoundError(f"No partitions under s3://{self.bucket_name}/{prefix}/")
 
-        frames = []
-        for directory in subdirs:
+        def _read_shard(directory: str):
             key = self._resolve_latest(directory)
             obj = self._s3.get_object(Bucket=self.bucket_name, Key=key)
-            frames.append(self._read_parquet_bytes(obj["Body"].read()))
+            return self._read_parquet_bytes(obj["Body"].read())
+
+        # Shards are independent S3 reads, so fetch+parse them concurrently. `map`
+        # preserves order, keeping the `frames[0]` CRS probe below deterministic.
+        with ThreadPoolExecutor(max_workers=min(len(subdirs), _READ_WORKERS)) as pool:
+            frames = list(pool.map(_read_shard, subdirs))
 
         combined = pd.concat(frames, ignore_index=True)
         if isinstance(frames[0], gpd.GeoDataFrame):
@@ -406,6 +410,28 @@ class s3_datastore(dg.ConfigurableResource):
             }
         )
         return self._now_stamp()
+
+    def write_check_result(self, context, asset_location: str, check_name: str, result: dg.AssetCheckResult) -> None:
+        """Persist a check result as ``{asset}/_checks/{check}.json``.
+
+        The deployed batch runs on a throwaway instance, so check results would otherwise
+        die with the task; this is their durable home, read back into one run report by batch.py.
+        """
+        payload = {
+            "asset": asset_location,
+            "check": check_name,
+            "passed": bool(result.passed),
+            "severity": result.severity.value if result.severity else None,
+            "stamp": self._now_stamp(),
+            "metadata": {k: getattr(v, "value", v) for k, v in (result.metadata or {}).items()},
+        }
+        self._s3.put_object(
+            Bucket=self.bucket_name,
+            Key=f"{asset_location}/{_CHECKS_DIR}/{check_name}.json",
+            Body=json.dumps(payload, default=str).encode("utf-8"),
+            ContentType="application/json",
+        )
+        context.log.info(f"check {check_name} -> {'pass' if result.passed else 'FAIL'} ({asset_location})")
 
 
 @dg.definitions

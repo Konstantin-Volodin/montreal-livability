@@ -82,6 +82,9 @@ class FakeStore(s3_datastore):
     def read_gpq(self, context, address):
         return _READ_FRAME
 
+    def write_check_result(self, context, asset_location, check_name, result):  # no S3 in tests
+        pass
+
 
 def _build(fetch, store):
     """Materialize a freshly-built raw_geo_asset against `store`, returning the result."""
@@ -107,7 +110,9 @@ def test_raw_geo_asset_wires_metadata_group_and_three_checks():
 
 def test_standard_checks_skips_value_range_without_bounds():
     # Bronze contracts carry no `bounds`, so value_range must not be added.
-    assert len(standard_checks(*_dummy_asset_and_contract())) == 3
+    checks = standard_checks(*_dummy_asset_and_contract())
+    names = {key.name for c in checks for key in c.check_keys}
+    assert names == {"schema_contract", "row_uniqueness", "field_completeness"}
 
 
 def _dummy_asset_and_contract():

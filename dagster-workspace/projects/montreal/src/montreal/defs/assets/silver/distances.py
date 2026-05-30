@@ -69,72 +69,54 @@ def nearest(addr_df, amenity_df, max_k=10, log=None) -> pd.DataFrame:
          every address in that cell.
       4. Haversine-distance every address to its candidates and keep the minimum.
     """
-    def _info(msg):
-        if log is not None: log.info(msg)
-
     dist_columns = [f"dist_{category}" for category in POI_CATEGORIES]
     distances = pd.DataFrame(index=addr_df.index, columns=dist_columns, dtype=float)
 
     # Step 1: only addresses with a cell + lat/lng can be matched.
     addr_work = addr_df.dropna(subset=["h3_r10", "lat", "lng"])
-    _info(f"_nearest_distances: {len(addr_work)}/{len(addr_df)} addresses usable, {len(amenity_df)} amenity points")
 
     # Step 2: bucket each category's points by the H3 r10 cell they sit in.
-    points_by_category = {}
-    for category in POI_CATEGORIES:
-        category_df = amenity_df[amenity_df["category"] == category]
-        points_by_category[category] = {
+    points_by_category = {
+        category: {
             cell: group[["lat", "lng"]].to_numpy(dtype=float)
-            for cell, group in category_df.groupby("h3_r10", sort=False)
+            for cell, group in amenity_df[amenity_df["category"] == category].groupby("h3_r10", sort=False)
         }
-        _info(f"  category '{category}': {len(category_df)} points across {len(points_by_category[category])} H3 cells")
+        for category in POI_CATEGORIES
+    }
 
     cells = addr_work["h3_r10"].to_numpy()
     coords = addr_work[["lat", "lng"]].to_numpy(dtype=float)
     unique_cells = pd.unique(addr_work["h3_r10"])
-    _info(f"  {len(unique_cells)} unique address cells to resolve per category")
 
+    summary = []
     for category, points_by_cell in points_by_category.items():
 
         # Step 3: step the ring distance out one k at a time, stopping at the first ring that holds an amenity cell.
         candidate_cache = {}
-        no_candidate_cells = 0
         for addr_cell in unique_cells:
             found = []
-
-            # k ring search for the nearest amenity cell(s)
             for k in range(max_k + 1):
-                grid_ring_cells = h3.grid_ring(addr_cell, k)
-                found = [points_by_cell[cell] for cell in grid_ring_cells if cell in points_by_cell]
+                found = [points_by_cell[c] for c in h3.grid_ring(addr_cell, k) if c in points_by_cell]
                 if found: break
-
-            if not found: no_candidate_cells += 1
-            candidate_cache[addr_cell] = (np.vstack(found) if found else np.empty((0, 2), dtype=float))
-        _info(f"  category '{category}': {no_candidate_cells} cells found no amenity within k={max_k}")
+            candidate_cache[addr_cell] = np.vstack(found) if found else np.empty((0, 2), dtype=float)
 
         # Step 4: vectorized haversine to candidates, keep the nearest.
         category_distances = np.full(len(addr_work), np.nan, dtype=float)
         for addr_cell, candidates in candidate_cache.items():
             if len(candidates) == 0: continue
-
             positions = np.flatnonzero(cells == addr_cell)
             addr_coords = coords[positions]
-            candidate_distances = haversine(
-                addr_coords[:, [0]],
-                addr_coords[:, [1]],
-                candidates[None, :, 0],
-                candidates[None, :, 1],
-            )
-            category_distances[positions] = np.nanmin(candidate_distances, axis=1)
-        resolved = int(np.count_nonzero(~np.isnan(category_distances)))
+            category_distances[positions] = np.nanmin(haversine(
+                addr_coords[:, [0]], addr_coords[:, [1]],
+                candidates[None, :, 0], candidates[None, :, 1],
+            ), axis=1)
 
-        _info(
-            f"  category '{category}': {resolved}/{len(addr_work)} addresses got "
-            f"a distance (median {np.nanmedian(category_distances):.0f} m)"
-            if resolved else f"  category '{category}': 0 addresses got a distance"
-        )
+        resolved = int(np.count_nonzero(~np.isnan(category_distances)))
+        summary.append(f"{category} {resolved}/{len(addr_work)} ({np.nanmedian(category_distances):.0f}m)" if resolved else f"{category} 0/{len(addr_work)}")
         distances.loc[addr_work.index, f"dist_{category}"] = category_distances
 
+    if log is not None:
+        log.info(f"nearest: {len(addr_work)}/{len(addr_df)} addresses, {len(amenity_df)} amenities | " + "  ".join(summary))
     return distances
 
 # asset
@@ -155,10 +137,10 @@ def distances_to_amenities(context: dg.AssetExecutionContext, s3_datastore: s3_d
         return s3_datastore.reemit_latest(context)
 
     addresses = s3_datastore.read_gpq(context, f"{location_of(h3_montreal_addresses)}/{context.partition_key}")
-    amenities = s3_datastore.read_gpq(context, location_of(amenities))
+    amenity_points = s3_datastore.read_gpq(context, location_of(amenities))
 
     address_points = points_with_lat_lng(addresses)
-    distance_df = nearest(address_points, amenities, log=context.log)
+    distance_df = nearest(address_points, amenity_points, log=context.log)
 
     out = addresses.copy()
     for column in distance_df.columns:

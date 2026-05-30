@@ -132,6 +132,9 @@ class FakeStore(s3_datastore):
     def read_gpq_prefix(self, context, prefix):
         return _FRAME
 
+    def write_check_result(self, context, asset_location, check_name, result):  # no S3 in tests
+        pass
+
 
 @dg.asset(name="gold_fixture", metadata={"layer": "gold", "segmentation": "snapshot"})
 def gold_fixture(context, s3_datastore: s3_datastore) -> dg.MaterializeResult:

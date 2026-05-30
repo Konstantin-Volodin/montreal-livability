@@ -3,8 +3,10 @@ parquet read fallback, and the change-detection skip that the serverless caching
 relies on (its only durable state is S3, so the skip logic is load-bearing)."""
 
 import io
+import json
 import re
 
+import dagster as dg
 import geopandas as gpd
 import pandas as pd
 from shapely.geometry import Point
@@ -65,6 +67,33 @@ def test_gpq_preview_drops_geometry():
     geo = gpd.GeoDataFrame({"name": ["x"]}, geometry=[Point(0, 0)], crs=4326)
     preview = store.gpq_preview(geo)
     assert "name" in preview and "geometry" not in preview
+
+
+class _FakeS3:
+    def __init__(self):
+        self.puts = []
+
+    def put_object(self, **kwargs):
+        self.puts.append(kwargs)
+
+
+def test_write_check_result_persists_normalized_json():
+    store = s3_datastore(bucket_name="b", region_name="r")
+    store._s3 = _FakeS3()
+    result = dg.AssetCheckResult(
+        passed=False,
+        severity=dg.AssetCheckSeverity.ERROR,
+        metadata={"duplicate_rows": 3, "subset": dg.MetadataValue.json(["ID_UEV"])},
+    )
+    store.write_check_result(_Ctx(), "silver/amenities", "row_uniqueness", result)
+
+    put = store._s3.puts[0]
+    assert put["Key"] == "silver/amenities/_checks/row_uniqueness.json"
+    payload = json.loads(put["Body"])
+    assert payload["passed"] is False and payload["severity"] == "ERROR"
+    # MetadataValue and raw values both land as plain JSON.
+    assert payload["metadata"]["duplicate_rows"] == 3
+    assert payload["metadata"]["subset"] == ["ID_UEV"]
 
 
 # --- change-detection skip ------------------------------------------------
