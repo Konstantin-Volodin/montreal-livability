@@ -6,7 +6,9 @@ at runtime, so distances (r6-partitioned) and gold can't share a command that re
 its partition set up front. That's the *only* barrier -- everything upstream of it goes
 in a single run so Dagster's executor pipelines by real dependency edges (h3_parks
 starts when its bronze lands, not after the whole bronze "stage" finishes). Output is
-the S3 lakehouse; the $DAGSTER_HOME SQLite instance is throwaway and dies with the task.
+the S3 lakehouse; the $DAGSTER_HOME SQLite instance lives on local disk and is synced
+to EFS around the run (restore_state/persist_state) so run history + dynamic partitions
+survive between monthly tasks.
 
 Each check writes its result to the lakehouse (see lakehouse.write_check_result); after
 the pipeline we read them into one `quality/{run}.json` report, print a summary, and email
@@ -18,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -33,23 +36,13 @@ S3_BUCKET = os.environ.get("S3_BUCKET")
 S3_REGION = os.environ.get("S3_REGION", "ca-central-1")
 ALERT_TOPIC_ARN = os.environ.get("ALERT_TOPIC_ARN")  # SNS topic for ERROR-check failures; unset -> no email
 
+DAGSTER_HOME = os.environ.get("DAGSTER_HOME", "")
+DAGSTER_STATE_DIR = os.environ.get("DAGSTER_STATE_DIR")  # EFS mount; unset (local dev/tests) -> no persistence
+
 # Concurrent r6 partition runs. Pinned, not os.cpu_count() (host cores on Fargate);
-# the runs share one throwaway SQLite instance. Override via env.
+# the runs share one local-disk SQLite instance (synced to EFS around the batch),
+# which handles concurrent writers fine. Override via env.
 PARTITION_CONCURRENCY = int(os.environ.get("PARTITION_CONCURRENCY", "2"))
-
-# Every non-partitioned asset, comma-unioned into one selection (CLI splits on ",").
-# Explicit (no "+"): each token names exactly what it covers. Assets self-gate on
-# freshness/upstream change, so re-runs are cheap; only livability_map always re-renders.
-UPSTREAM_SELECTION = ",".join([
-    "group:raw_data",           # bronze: addresses, bike paths, municipality boundaries, parks, pois, transit stops
-    "group:H3_indexed",         # silver h3 layers; h3_montreal_addresses registers the r6 partitions
-    "amenities",                # silver amenity points
-    "montreal_municipalities",  # silver municipalities
-])
-
-# Gold, after every r6 distance partition exists: livability_score then livability_map.
-GOLD_SELECTION = "group:analytics"
-
 
 def _cmd(selection: str, partition: str | None = None) -> list[str]:
     cmd = ["dagster", "asset", "materialize", "-m", MODULE, "--select", selection]
@@ -144,28 +137,124 @@ def report_quality(run_stamp: str) -> None:
         email_errors(errors, run_stamp)
 
 
-def main() -> int:
-    # Run 1: all non-partitioned assets; the executor pipelines bronze -> silver.
-    print("\n=== upstream: bronze + silver (pipelined) ===", flush=True)
-    materialize(UPSTREAM_SELECTION)
+def restore_state() -> None:
+    """Copy the durable instance from EFS into the local $DAGSTER_HOME (cold run: no-op)."""
+    if DAGSTER_STATE_DIR and os.path.isdir(DAGSTER_STATE_DIR) and os.listdir(DAGSTER_STATE_DIR):
+        shutil.copytree(DAGSTER_STATE_DIR, DAGSTER_HOME, dirs_exist_ok=True)
+        print(f"restored Dagster instance from {DAGSTER_STATE_DIR}", flush=True)
 
-    # Run 2: one materialize per r6 cell, so the partitions must already be registered.
-    with DagsterInstance.get() as instance: partitions = sorted(instance.get_dynamic_partitions(R6_PARTITIONS))
-    print(f"\n=== distances_to_amenities: {len(partitions)} r6 partitions ===", flush=True)
-    failed = materialize_partitions("distances_to_amenities", partitions)
-    if failed:
-        print(f"{len(failed)}/{len(partitions)} partition(s) failed: {sorted(failed)}", file=sys.stderr)
-        return 1
 
-    # Run 3: gold.
-    print("\n=== gold: score + report ===", flush=True)
-    materialize(GOLD_SELECTION)
+def persist_state() -> None:
+    """Copy the local $DAGSTER_HOME back to EFS so the next run inherits it."""
+    if DAGSTER_STATE_DIR:
+        shutil.copytree(DAGSTER_HOME, DAGSTER_STATE_DIR, dirs_exist_ok=True)
+        print(f"persisted Dagster instance to {DAGSTER_STATE_DIR}", flush=True)
+
+
+def _asset_graph():
+    """The project's resolved asset graph (keys, groups, partition flags)."""
+    from pathlib import Path
+
+    import dagster as dg
+
+    import montreal.definitions as md
+
+    return dg.load_from_defs_folder(path_within_project=Path(md.__file__).parent).resolve_asset_graph()
+
+
+def _stale(asset_graph, partition_of: str | None = None) -> set[str] | None:
+    """Asset names (or partition keys of ``partition_of``) Dagster reports STALE/MISSING.
+
+    Opens the EFS-restored instance fresh each call, so the verdict reflects every prior
+    phase's writes. Returns None on any failure -- the caller then materializes the full
+    selection, so a broken resolver over-materializes rather than skipping needed work.
+    Uses internal `_core` APIs, pinned against dagster==1.13.5.
+    """
+    try:
+        from dagster._core.asset_graph_view.asset_graph_view import AssetGraphView, TemporalContext
+        from dagster._core.definitions.data_version import CachingStaleStatusResolver, StaleStatus
+        from dagster._time import get_current_datetime
+
+        recompute = {StaleStatus.STALE, StaleStatus.MISSING}
+        with DagsterInstance.get() as instance:
+            view = AssetGraphView(
+                temporal_context=TemporalContext(effective_dt=get_current_datetime(), last_event_id=None),
+                instance=instance, asset_graph=asset_graph,
+            )
+            resolver = CachingStaleStatusResolver(instance=instance, asset_graph=asset_graph, loading_context=view)
+            if partition_of is not None:
+                key = next(k for k in asset_graph.materializable_asset_keys if k.to_user_string() == partition_of)
+                return {p for p in instance.get_dynamic_partitions(R6_PARTITIONS) if resolver.get_status(key, p) in recompute}
+            return {
+                k.to_user_string()
+                for k in asset_graph.materializable_asset_keys
+                if not asset_graph.get(k).is_partitioned and resolver.get_status(k) in recompute
+            }
+    except Exception as e:
+        print(f"stale-status query failed ({e!r}); materializing the full selection", file=sys.stderr, flush=True)
+        return None
+
+
+def _run() -> int:
+    ag = _asset_graph()
+    # Unpartitioned silver: H3_indexed + amenities + municipalities (everything that is
+    # neither bronze `raw_data` nor gold `analytics`, and not the partitioned distances).
+    silver = {
+        k.to_user_string() for k in ag.materializable_asset_keys
+        if not ag.get(k).is_partitioned and ag.get(k).group_name not in ("raw_data", "analytics")
+    }
+
+    # Phase 1 -- bronze, always. Each raw asset self-gates on external (time) freshness:
+    # young snapshot -> re-emit its stamp unchanged (cheap, keeps downstream FRESH); old
+    # -> re-download with a new stamp. Dagster staleness can't see external age, so this
+    # one gate stays.
+    print("\n=== bronze: raw_data (always) ===", flush=True)
+    materialize("group:raw_data")
+
+    # Phase 2 -- silver: only what Dagster now reports stale. Queried *after* bronze ran,
+    # so a bronze re-download has already advanced its DataVersion and the dependent
+    # silver shows STALE. Sequential (not pipelined) so the verdict is current.
+    stale = _stale(ag)
+    targets = sorted(silver if stale is None else silver & stale)
+    print(f"\n=== silver: {len(targets)}/{len(silver)} stale ===", flush=True)
+    if targets:
+        materialize(",".join(targets))
+
+    # Phase 3 -- distances: one run per stale r6 partition. Partitions are registered by
+    # h3_montreal_addresses (phase 2) or inherited from the EFS instance.
+    with DagsterInstance.get() as instance:
+        partitions = set(instance.get_dynamic_partitions(R6_PARTITIONS))
+    stale_parts = _stale(ag, partition_of="distances_to_amenities")
+    targets = sorted(partitions if stale_parts is None else partitions & stale_parts)
+    print(f"\n=== distances_to_amenities: {len(targets)}/{len(partitions)} stale r6 partitions ===", flush=True)
+    if targets:
+        failed = materialize_partitions("distances_to_amenities", targets)
+        if failed:
+            print(f"{len(failed)}/{len(targets)} partition(s) failed: {sorted(failed)}", file=sys.stderr)
+            return 1
+
+    # Phase 4 -- gold: the map re-renders every run; the score only when stale.
+    stale = _stale(ag)
+    gold = (["livability_score"] if stale is None or "livability_score" in stale else []) + ["livability_map"]
+    print(f"\n=== gold: {', '.join(gold)} ===", flush=True)
+    materialize(",".join(gold))
 
     # Durable check results -> one run report + email on ERROR failures (recorded, not gated).
     report_quality(f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}")
 
     print("\nPipeline complete.", flush=True)
     return 0
+
+
+def main() -> int:
+    # Restore first, then run; the finally saves the instance even on the partition-failure
+    # path so partial history persists. persist_state runs only once all materialize
+    # subprocesses have joined - the DB is quiesced, so copytree grabs a consistent dir.
+    restore_state()
+    try:
+        return _run()
+    finally:
+        persist_state()
 
 
 if __name__ == "__main__":

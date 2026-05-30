@@ -1,6 +1,5 @@
 """Tests for the S3 lakehouse resource: path/format helpers, WGS84 normalization,
-parquet read fallback, and the change-detection skip that the serverless caching
-relies on (its only durable state is S3, so the skip logic is load-bearing)."""
+parquet read fallback, and check-result persistence."""
 
 import io
 import json
@@ -14,15 +13,20 @@ from upath import UPath
 
 from montreal.defs.assets.bronze import montreal_pois
 from montreal.defs.assets.silver.amenities import amenities
-from montreal.defs.resources.lakehouse import format_size, location_of, s3_datastore, skip
+from montreal.defs.resources.lakehouse import format_size, location_of, s3_datastore
 from montreal.defs.resources.lakehouse.frames import preview, read_parquet_bytes, to_wgs84
 from montreal.defs.resources.lakehouse.paths import now_stamp
 
-OLD = "20240101T000000_000000Z"
-NEW = "20240601T000000_000000Z"
-
 
 # --- pure helpers ---------------------------------------------------------
+
+
+class _Ctx:
+    class _Log:
+        def info(self, *a, **k):
+            pass
+
+    log = _Log()
 
 
 def test_location_of_is_layer_over_asset_name():
@@ -87,75 +91,3 @@ def test_write_check_result_persists_normalized_json():
     # MetadataValue and raw values both land as plain JSON.
     assert payload["metadata"]["duplicate_rows"] == 3
     assert payload["metadata"]["subset"] == ["ID_UEV"]
-
-
-# --- change-detection skip ------------------------------------------------
-
-
-class _Ctx:
-    class _Log:
-        def info(self, *a, **k):
-            pass
-
-    log = _Log()
-
-
-class SkipStore(s3_datastore):
-    """Drives should_skip from test-set stamps instead of S3."""
-
-    own_stamp: str | None = None
-    provenance_version: str | None = None
-    upstream_stamps: dict[str, str | None] = {}
-
-    def setup_for_execution(self, context) -> None:
-        pass
-
-    def output_stamp(self, context):
-        return self.own_stamp
-
-    def _own_dir(self, context):
-        return "self"
-
-    def _read_manifest(self, directory):
-        return {"code_version": self.provenance_version}
-
-    def latest_stamp(self, directory):
-        return self.upstream_stamps.get(directory)
-
-    def latest_stamp_under_prefix(self, directory):
-        return self.upstream_stamps.get(directory)
-
-
-def _store(**kwargs) -> SkipStore:
-    return SkipStore(bucket_name="b", region_name="r", **kwargs)
-
-
-def test_skip_false_when_asset_has_no_output_yet():
-    store = _store(own_stamp=None)
-    assert skip.should_skip(store, _Ctx(),["bronze/x"], code_version="1") is False
-
-
-def test_skip_false_when_code_version_changed():
-    store = _store(own_stamp=NEW, provenance_version="0", upstream_stamps={"bronze/x": OLD})
-    assert skip.should_skip(store, _Ctx(),["bronze/x"], code_version="1") is False
-
-
-def test_skip_false_when_an_upstream_is_missing():
-    store = _store(own_stamp=NEW, provenance_version="1", upstream_stamps={"bronze/x": None})
-    assert skip.should_skip(store, _Ctx(),["bronze/x"], code_version="1") is False
-
-
-def test_skip_false_when_an_upstream_is_newer():
-    store = _store(own_stamp=OLD, provenance_version="1", upstream_stamps={"bronze/x": NEW})
-    assert skip.should_skip(store, _Ctx(),["bronze/x"], code_version="1") is False
-
-
-def test_skip_true_when_inputs_unchanged():
-    store = _store(own_stamp=NEW, provenance_version="1", upstream_stamps={"bronze/x": OLD})
-    assert skip.should_skip(store, _Ctx(),["bronze/x"], code_version="1") is True
-
-
-def test_skip_handles_prefix_upstreams_via_shard_max():
-    # a (directory, is_prefix=True) entry takes the newest stamp across shards.
-    store = _store(own_stamp=NEW, provenance_version="1", upstream_stamps={"silver/sharded": OLD})
-    assert skip.should_skip(store, _Ctx(),[("silver/sharded", True)], code_version="1") is True

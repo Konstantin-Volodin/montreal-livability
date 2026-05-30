@@ -10,7 +10,7 @@ import pytest
 from shapely.geometry import LineString, Point
 
 from montreal.defs.assets.silver import amenities, distances, municipalities
-from montreal.defs.assets.silver.config import (
+from montreal.defs.assets.silver._config import (
     POI_CATEGORIES,
     h3_index,
     h3_linetrace,

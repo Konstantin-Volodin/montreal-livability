@@ -11,7 +11,7 @@ import pytest
 from shapely.geometry import Point, Polygon, box
 
 from montreal.defs.assets.gold import livability_map, livability_score
-from montreal.defs.assets.gold.config import (
+from montreal.defs.assets.gold._config import (
     DEFAULT_WEIGHTS,
     SCORE_COLUMNS,
     UNKNOWN_MUNICIPALITY,
@@ -24,7 +24,7 @@ from montreal.defs.assets.gold.livability_map import (
     _municipality_table,
 )
 from montreal.defs.assets.gold.livability_score import _distance_score, _tag_municipalities
-from montreal.defs.assets.silver.config import POI_CATEGORIES
+from montreal.defs.assets.silver._config import POI_CATEGORIES
 from montreal.defs.checks.factory import standard_checks
 from montreal.defs.resources.lakehouse import s3_datastore
 

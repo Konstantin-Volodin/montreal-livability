@@ -15,7 +15,7 @@ from montreal.defs.assets.silver._config import (
     points_with_lat_lng,
 )
 from montreal.defs.checks.factory import standard_checks
-from montreal.defs.resources.lakehouse import location_of, s3_datastore, skip
+from montreal.defs.resources.lakehouse import location_of, s3_datastore
 from montreal.defs.assets.silver.h3 import (
     h3_montreal_bike_paths,
     h3_montreal_osm_pois,
@@ -59,15 +59,6 @@ def _amenity_frame(gdf: gpd.GeoDataFrame, category: str | None = None) -> gpd.Ge
 )
 def amenities(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """amenity candidate points for nearest-distance search."""
-    upstreams = [
-        location_of(h3_montreal_osm_pois),
-        location_of(h3_montreal_transit_stops),
-        location_of(h3_montreal_parks),
-        location_of(h3_montreal_bike_paths),
-    ]
-    if skip.should_skip(s3_datastore, context, upstreams, code_version=CODE_VERSION):
-        return skip.reemit_latest(s3_datastore, context)
-
     # read data
     osm_pois = s3_datastore.read_gpq(context, location_of(h3_montreal_osm_pois))
     transit = s3_datastore.read_gpq(context, location_of(h3_montreal_transit_stops))
@@ -96,7 +87,7 @@ def amenities(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> 
         context.log.info(f"  {category}: {count} rows")
 
     # export
-    stamp = s3_datastore.write_gpq(context, amenities, code_version=CODE_VERSION)
+    stamp = s3_datastore.write_gpq(context, amenities)
     return dg.MaterializeResult(data_version=dg.DataVersion(stamp) if stamp else None)
 
 # asset checks

@@ -21,9 +21,8 @@ from .paths import format_size, location_of, now_stamp, parse_stamp, stamp_of
 # Threads for reading a sharded asset's per-shard snapshots in parallel.
 _READ_WORKERS = 16
 
-# Per-directory JSON {key, code_version}: `key` names the newest snapshot (None at a
-# sharded asset's base dir); `code_version` lets a logic change force a recompute.
-# One GET, always consistent. See `should_skip`.
+# Per-directory JSON {key}: `key` names the newest snapshot (None at a sharded asset's
+# base dir). One GET, always consistent -- the pointer to "latest" without a LIST.
 _MANIFEST = "_manifest"
 
 # Subdir under an asset dir holding one JSON per check result; batch.py reads them into a run report.
@@ -57,8 +56,8 @@ class s3_datastore(dg.ConfigurableResource):
         base = location_of(context.assets_def)
         return f"{base}/{shard}" if shard is not None else base
 
-    def _write_manifest(self, directory: str, key: Optional[str], code_version: Optional[str]) -> None:
-        (self._base / directory / _MANIFEST).write_text(json.dumps({"key": key, "code_version": code_version}))
+    def _write_manifest(self, directory: str, key: Optional[str]) -> None:
+        (self._base / directory / _MANIFEST).write_text(json.dumps({"key": key}))
 
     def _read_manifest(self, directory: str) -> Optional[dict]:
         """A directory's manifest dict, or None if it was never written / is unreadable."""
@@ -67,11 +66,11 @@ class s3_datastore(dg.ConfigurableResource):
         except (FileNotFoundError, ValueError):
             return None
 
-    def _put_snapshot(self, directory: str, data: bytes, stamp: str, code_version: Optional[str]) -> str:
+    def _put_snapshot(self, directory: str, data: bytes, stamp: str) -> str:
         """Write a snapshot under ``directory`` at ``stamp`` and rewrite the directory manifest. Returns its key."""
         key = f"{directory}/{stamp}.parquet"
         (self._base / key).write_bytes(data)
-        self._write_manifest(directory, key, code_version)
+        self._write_manifest(directory, key)
         return key
 
     def _resolve_latest(self, directory: str) -> UPath:
@@ -100,24 +99,10 @@ class s3_datastore(dg.ConfigurableResource):
             return []
         return [f"{prefix}/{p.name}" for p in children if p.is_dir()]
 
-    def shard_keys(self, prefix: str) -> list[str]:
-        """Names (last segment) of the per-shard subdirs under ``prefix``.
-
-        Used to re-register dynamic partitions from S3 when the Dagster instance is
-        ephemeral and a sharded producer (e.g. ``h3_montreal_addresses``) skips its
-        recompute but its r6 partitions still must exist for downstream consumers.
-        """
-        return [d.rsplit("/", 1)[-1] for d in self._shard_dirs(prefix)]
-
-    def latest_stamp_under_prefix(self, prefix: str) -> Optional[str]:
-        """Newest stamp across every per-shard subdir under ``prefix`` (None if no shards)."""
-        stamps = [s for s in (self.latest_stamp(d) for d in self._shard_dirs(prefix)) if s]
-        return max(stamps) if stamps else None
-
     # --- metadata ------------------------------------------------------------
 
     def _snapshot_metadata(self, path: UPath, file_size: int, gdf) -> dict:
-        """Rich materialization metadata for a snapshot, shared by fresh writes and cache hits."""
+        """Rich materialization metadata for a freshly written snapshot."""
         return {
             "s3_location": dg.MetadataValue.text(str(path)),
             "file_size": dg.MetadataValue.text(format_size(file_size)),
@@ -126,35 +111,9 @@ class s3_datastore(dg.ConfigurableResource):
             "preview": dg.MetadataValue.md(frames.preview(gdf)),
         }
 
-    def describe_latest(self, context, directory: str) -> None:
-        """Emit metadata for a directory's latest snapshot, reading but never rewriting it (cache hits)."""
-        path = self._resolve_latest(directory)
-        raw = path.read_bytes()
-        context.add_output_metadata(self._snapshot_metadata(path, len(raw), frames.read_parquet_bytes(raw)))
-
-    # --- this asset's own output (queried by the change-detection skip) ------
-
-    def _own_dir(self, context) -> str:
-        """Directory holding this asset's output for the current run (partition shard, else base dir)."""
-        return self.asset_dir(context, context.partition_key if context.has_partition_key else None)
-
-    def output_stamp(self, context) -> Optional[str]:
-        """Stamp of this asset's own latest output, or None if it has never been written.
-
-        Resolves a single snapshot, a partition's shard, or the newest stamp across
-        all shards of a sharded asset, depending on how this asset writes.
-        """
-        if context.has_partition_key:
-            return self.latest_stamp(self.asset_dir(context, context.partition_key))
-        segmentation = context.assets_def.metadata_by_key[context.asset_key].get("segmentation")
-        base = location_of(context.assets_def)
-        if segmentation in (None, "snapshot"):
-            return self.latest_stamp(base)
-        return self.latest_stamp_under_prefix(base)
-
     # --- writes & reads ------------------------------------------------------
 
-    def write_gpq(self, context, gdf: gpd.GeoDataFrame, code_version: Optional[str] = None) -> Optional[str]:
+    def write_gpq(self, context, gdf: gpd.GeoDataFrame) -> Optional[str]:
         """Write a GeoDataFrame to S3 as a timestamped Parquet snapshot; return its stamp."""
         if context.has_partition_key and gdf is not None and not gdf.empty:
             column = context.assets_def.metadata_by_key[context.asset_key].get("segmentation")
@@ -174,12 +133,12 @@ class s3_datastore(dg.ConfigurableResource):
         data = frames.to_parquet_bytes(gdf)
 
         stamp = now_stamp()
-        path = self._base / self._put_snapshot(self.asset_dir(context, shard), data, stamp, code_version)
+        path = self._base / self._put_snapshot(self.asset_dir(context, shard), data, stamp)
         context.log.info(f"Wrote snapshot {path}")
         context.add_output_metadata(self._snapshot_metadata(path, len(data), gdf))
         return stamp
 
-    def write_gpq_partitioned(self, context, gdf: gpd.GeoDataFrame, column: str, code_version: Optional[str] = None) -> Optional[str]:
+    def write_gpq_partitioned(self, context, gdf: gpd.GeoDataFrame, column: str) -> Optional[str]:
         """Pre-shard a GeoDataFrame into one snapshot dir per distinct ``column`` value, so an r6-partitioned consumer reads only its slice. Returns the shared stamp."""
         if gdf is None or gdf.empty:
             context.log.info("No data. Skipping partitioned write.")
@@ -188,11 +147,11 @@ class s3_datastore(dg.ConfigurableResource):
         gdf = frames.to_wgs84(gdf)
         stamp = now_stamp()
         for value, group in gdf.groupby(column, sort=False):
-            self._put_snapshot(self.asset_dir(context, str(value)), frames.to_parquet_bytes(group), stamp, code_version)
+            self._put_snapshot(self.asset_dir(context, str(value)), frames.to_parquet_bytes(group), stamp)
         written = int(gdf[column].nunique())
 
-        # Base-dir manifest (no snapshot of its own) carries the code_version for the whole sharded asset.
-        self._write_manifest(self.asset_dir(context), None, code_version)
+        # Base dir has no snapshot of its own; an empty manifest marks the sharded asset.
+        self._write_manifest(self.asset_dir(context), None)
         context.log.info(f"write_gpq_partitioned: {written} snapshots under {self.asset_dir(context)}/ keyed by '{column}'")
         context.add_output_metadata(
             {

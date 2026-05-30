@@ -13,7 +13,7 @@ from montreal.defs.assets.silver._config import (
     h3_index,
 )
 from montreal.defs.checks.factory import standard_checks
-from montreal.defs.resources.lakehouse import location_of, s3_datastore, skip
+from montreal.defs.resources.lakehouse import location_of, s3_datastore
 
 # metadata
 ASSET_META = SilverAssetMetadata(
@@ -40,9 +40,6 @@ _POI_CATEGORIES = {
 @dg.asset(group_name="H3_indexed", metadata=asdict(ASSET_META), deps=[montreal_pois], code_version=CODE_VERSION)
 def h3_montreal_osm_pois(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """Filter OSM POIs to livability categories used by the distance layer."""
-    if skip.should_skip(s3_datastore, context, [location_of(montreal_pois)], code_version=CODE_VERSION):
-        return skip.reemit_latest(s3_datastore, context)
-
     # read data
     gdf = s3_datastore.read_gpq(context, location_of(montreal_pois))
     if "fclass" not in gdf.columns:
@@ -76,7 +73,7 @@ def h3_montreal_osm_pois(context: dg.AssetExecutionContext, s3_datastore: s3_dat
         f"{final['category'].nunique()} categories"
     )
 
-    stamp = s3_datastore.write_gpq(context, final, code_version=CODE_VERSION)
+    stamp = s3_datastore.write_gpq(context, final)
     return dg.MaterializeResult(data_version=dg.DataVersion(stamp) if stamp else None)
 
 # asset checks

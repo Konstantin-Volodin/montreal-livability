@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from typing import Dict, Sequence, Tuple
 
-from montreal.defs.assets.silver.config import POI_CATEGORIES
+from montreal.defs.assets.silver._config import POI_CATEGORIES
 
 # Constants shared by the gold assets (livability_score + livability_map).
 UNKNOWN_MUNICIPALITY = "Inconnu"

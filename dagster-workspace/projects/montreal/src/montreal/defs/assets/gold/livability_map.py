@@ -15,7 +15,7 @@ import pandas as pd
 from shapely.geometry import Polygon
 
 from montreal.defs.assets.gold import report
-from montreal.defs.assets.gold.config import (
+from montreal.defs.assets.gold._config import (
     SCORE_COLUMNS,
     UNKNOWN_MUNICIPALITY,
     GoldAssetMetadata,

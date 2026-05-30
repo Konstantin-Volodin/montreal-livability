@@ -10,18 +10,18 @@ import pandas as pd
 from shapely.geometry import Point
 
 from montreal import __version__ as CODE_VERSION
-from montreal.defs.assets.gold.config import (
+from montreal.defs.assets.gold._config import (
     DEFAULT_WEIGHTS,
     SCORE_COLUMNS,
     UNKNOWN_MUNICIPALITY,
     GoldAssetDataContract,
     GoldAssetMetadata,
 )
-from montreal.defs.assets.silver.config import POI_CATEGORIES
+from montreal.defs.assets.silver._config import POI_CATEGORIES
 from montreal.defs.assets.silver.municipalities import montreal_municipalities
 from montreal.defs.assets.silver.distances import distances_to_amenities
 from montreal.defs.checks.factory import standard_checks
-from montreal.defs.resources.lakehouse import location_of, s3_datastore, skip
+from montreal.defs.resources.lakehouse import location_of, s3_datastore
 
 _SCORE_CURVE = ((100.0, 100.0), (500.0, 50.0), (1000.0, 20.0))
 
@@ -90,13 +90,6 @@ def livability_score(
     config: LivabilityWeights,
 ) -> dg.MaterializeResult:
     """Per-r10-cell amenity scores + the weighted livability blend (gold)."""
-    upstreams = [
-        (location_of(distances_to_amenities), True),  # all r6 distance shards
-        location_of(montreal_municipalities),
-    ]
-    if skip.should_skip(s3_datastore, context, upstreams, code_version=CODE_VERSION):
-        return skip.reemit_latest(s3_datastore, context)
-
     distances = s3_datastore.read_gpq_prefix(context, location_of(distances_to_amenities))
     boundaries = s3_datastore.read_gpq(context, location_of(montreal_municipalities))
 
@@ -140,7 +133,7 @@ def livability_score(
         f"(weights {weights}, sum {total:.2f})"
     )
 
-    stamp = s3_datastore.write_gpq(context, out, code_version=CODE_VERSION)
+    stamp = s3_datastore.write_gpq(context, out)
     return dg.MaterializeResult(
         data_version=dg.DataVersion(stamp) if stamp else None,
         metadata={

@@ -8,8 +8,8 @@ import folium
 import pandas as pd
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from montreal.defs.assets.gold.config import DEFAULT_WEIGHTS
-from montreal.defs.assets.silver.config import POI_CATEGORIES
+from montreal.defs.assets.gold._config import DEFAULT_WEIGHTS
+from montreal.defs.assets.silver._config import POI_CATEGORIES
 
 POI_LABELS = {
     "grocery": "Grocery stores",

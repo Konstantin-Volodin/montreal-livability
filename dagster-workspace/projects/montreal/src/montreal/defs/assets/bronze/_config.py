@@ -6,7 +6,7 @@ import dagster as dg
 import geopandas as gpd
 
 from montreal.defs.checks.factory import standard_checks
-from montreal.defs.resources.lakehouse import s3_datastore, skip
+from montreal.defs.resources.lakehouse import s3_datastore
 
 
 @dataclass(frozen=True)
@@ -51,7 +51,11 @@ def raw_geo_asset(
 
         if age is not None and age <= datetime.timedelta(days=contract.freshness["max_days"]):
             context.log.info(f"Using snapshot for {directory} ({age.days}d old).")
-            return skip.reemit_latest(s3_datastore, context)
+            # Re-emit the existing stamp unchanged: downstream staleness stays FRESH, no rewrite.
+            return dg.MaterializeResult(
+                data_version=dg.DataVersion(s3_datastore.latest_stamp(directory)),
+                metadata={"s3_cache_hit": True},
+            )
 
         context.log.info("Downloading latest dataset")
         stamp = s3_datastore.write_gpq(context, fetch(context))

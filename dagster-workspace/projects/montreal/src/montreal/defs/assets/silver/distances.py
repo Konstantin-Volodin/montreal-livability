@@ -18,7 +18,7 @@ from montreal.defs.assets.silver._config import (
     r6_partitions,
 )
 from montreal.defs.checks.factory import standard_checks
-from montreal.defs.resources.lakehouse import location_of, s3_datastore, skip
+from montreal.defs.resources.lakehouse import location_of, s3_datastore
 
 # metadata
 ASSET_META = SilverAssetMetadata(
@@ -127,13 +127,6 @@ def nearest(addr_df, amenity_df, max_k=10, log=None) -> pd.DataFrame:
 )
 def distances_to_amenities(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """Nearest amenity distance per Montreal address and livability category."""
-    upstreams = [
-        f"{location_of(h3_montreal_addresses)}/{context.partition_key}",  # this partition's r6 shard
-        location_of(amenities),
-    ]
-    if skip.should_skip(s3_datastore, context, upstreams, code_version=CODE_VERSION):
-        return skip.reemit_latest(s3_datastore, context)
-
     addresses = s3_datastore.read_gpq(context, f"{location_of(h3_montreal_addresses)}/{context.partition_key}")
     amenity_points = s3_datastore.read_gpq(context, location_of(amenities))
 
@@ -145,7 +138,7 @@ def distances_to_amenities(context: dg.AssetExecutionContext, s3_datastore: s3_d
         out[column] = distance_df[column].to_numpy()
 
     context.log.info(f"distances_to_amenities: {len(out)} address rows with {len(distance_df.columns)} distance columns")
-    stamp = s3_datastore.write_gpq(context, out, code_version=CODE_VERSION)
+    stamp = s3_datastore.write_gpq(context, out)
     return dg.MaterializeResult(data_version=dg.DataVersion(stamp) if stamp else None)
 
 # asset checks

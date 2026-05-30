@@ -17,7 +17,7 @@ from montreal.defs.assets.bronze import (
     pois,
     transit_stops,
 )
-from montreal.defs.assets.bronze.config import (
+from montreal.defs.assets.bronze._config import (
     BronzeAssetDataContract,
     BronzeAssetMetadata,
     raw_geo_asset,
@@ -71,11 +71,12 @@ class FakeStore(s3_datastore):
             return None
         return datetime.now(timezone.utc) - timedelta(days=self.latest_age_days)
 
-    def reemit_latest(self, context):
-        _CALLS.append("reemit")
-        return dg.MaterializeResult(metadata={"skipped_unchanged": dg.MetadataValue.bool(True)})
+    def latest_stamp(self, directory):
+        # Only the fresh-snapshot re-emit reads this; use it as the cache-hit sentinel.
+        _CALLS.append("reuse")
+        return "STAMP"
 
-    def write_gpq(self, context, gdf, code_version=None):
+    def write_gpq(self, context, gdf):
         _CALLS.append("write")
         return "STAMP"
 
@@ -131,7 +132,7 @@ def test_fresh_snapshot_is_reused_without_fetching():
         store=FakeStore(bucket_name="b", region_name="r", latest_age_days=1),
     )
     assert result.success
-    assert _CALLS == ["reemit"]  # reused, never wrote
+    assert _CALLS == ["reuse"]  # reused, never wrote
     assert fetched == []  # fetch was skipped
 
 
