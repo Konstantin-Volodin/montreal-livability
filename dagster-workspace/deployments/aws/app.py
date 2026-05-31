@@ -14,6 +14,7 @@ from aws_cdk import (
     aws_ecr as ecr,
     aws_ecr_assets as ecr_assets,
     aws_ecs as ecs,
+    aws_efs as efs,
     aws_iam as iam,
     aws_logs as logs,
     aws_scheduler as scheduler,
@@ -29,7 +30,7 @@ assert PROJECT_DIR.is_dir(), f"montreal project not found at {PROJECT_DIR}"
 
 
 def _project_meta() -> tuple[str, str]:
-    """(name, version) from the montreal pyproject — used as the ECR repo + tag."""
+    """(name, version) from the montreal pyproject - used as the ECR repo + tag."""
     text = (PROJECT_DIR / "pyproject.toml").read_text()
     return (
         re.search(r'(?m)^name\s*=\s*"([^"]+)"', text)[1],
@@ -51,10 +52,12 @@ class LivabilityStack(cdk.Stack):
         super().__init__(scope, construct_id, **kwargs)
 
         vpc, cluster = self._network()
+        task_sg = ec2.SecurityGroup(self, "LivabilityTaskSg", vpc=vpc, allow_all_outbound=True, description="Montreal livability monthly task")
+        file_system, access_point = self._storage(vpc, task_sg)
         image = self._image()
         alert_topic = self._alerts(alert_email)
-        task_definition = self._task_definition(image, data_bucket, data_region, alert_topic, cpu=cpu, memory_limit_mib=memory_limit_mib)
-        state_machine = self._state_machine(vpc, cluster, task_definition)
+        task_definition = self._task_definition(image, data_bucket, data_region, alert_topic, file_system, access_point, cpu=cpu, memory_limit_mib=memory_limit_mib)
+        state_machine = self._state_machine(vpc, cluster, task_definition, task_sg)
         self._schedule(state_machine, schedule_expression, schedule_state)
 
         # Consumed by run.py to fire an on-demand execution.
@@ -71,6 +74,28 @@ class LivabilityStack(cdk.Stack):
         vpc.add_gateway_endpoint("S3Endpoint", service=ec2.GatewayVpcEndpointAwsService.S3)
         cluster = ecs.Cluster(self, "LivabilityCluster", vpc=vpc, enable_fargate_capacity_providers=True)
         return vpc, cluster
+
+
+    def _storage(self, vpc: ec2.Vpc, task_sg: ec2.SecurityGroup) -> tuple[efs.FileSystem, efs.AccessPoint]:
+        """Durable EFS store for the Dagster instance. batch.py copies $DAGSTER_HOME here
+        in a `finally`; the next task restores it - run history + dynamic partitions survive."""
+
+        file_system = efs.FileSystem(
+            self, "LivabilityState", vpc=vpc, encrypted=True,
+            removal_policy=cdk.RemovalPolicy.RETAIN,
+            lifecycle_policy=efs.LifecyclePolicy.AFTER_90_DAYS,
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
+        )
+        file_system.connections.allow_default_port_from(task_sg)  # 2049 from the task SG
+
+        # Access point enforces this posix uid/gid on every op regardless of the
+        # container's actual user, so the root container's cp writes land as a stable owner.
+        access_point = efs.AccessPoint(
+            self, "DagsterStateAp", file_system=file_system, path="/dagster",
+            create_acl=efs.Acl(owner_uid="1000", owner_gid="1000", permissions="750"),
+            posix_user=efs.PosixUser(uid="1000", gid="1000"),
+        )
+        return file_system, access_point
 
 
     def _alerts(self, alert_email: str) -> sns.Topic:
@@ -103,8 +128,9 @@ class LivabilityStack(cdk.Stack):
         )
         return ecs.ContainerImage.from_ecr_repository(repo, tag=IMAGE_VERSION)
 
-    def _task_definition(self, image: ecs.ContainerImage, data_bucket: str, data_region: str, alert_topic: sns.Topic, *, cpu: int, memory_limit_mib: int) -> ecs.FargateTaskDefinition:
-        """Fargate task def: the montreal image, lakehouse + SNS IAM, and CloudWatch logs."""
+    def _task_definition(self, image: ecs.ContainerImage, data_bucket: str, data_region: str, alert_topic: sns.Topic, file_system: efs.FileSystem, access_point: efs.AccessPoint, *, cpu: int, memory_limit_mib: int) -> ecs.FargateTaskDefinition:
+        """Fargate task def: the montreal image, lakehouse + SNS IAM, the EFS state volume,
+        and CloudWatch logs."""
 
         task_definition = ecs.FargateTaskDefinition(
             self,
@@ -134,7 +160,21 @@ class LivabilityStack(cdk.Stack):
             retention=logs.RetentionDays.ONE_MONTH,
             removal_policy=cdk.RemovalPolicy.DESTROY,
         )
-        task_definition.add_container(
+
+        # EFS state volume: $DAGSTER_HOME stays on local disk; this mounts at a separate
+        # path used only by batch.py's start/finally copies, so SQLite never runs on NFS.
+        task_definition.add_volume(
+            name="dagster-state",
+            efs_volume_configuration=ecs.EfsVolumeConfiguration(
+                file_system_id=file_system.file_system_id,
+                transit_encryption="ENABLED",
+                authorization_config=ecs.AuthorizationConfig(
+                    access_point_id=access_point.access_point_id, iam="ENABLED",
+                ),
+            ),
+        )
+
+        container = task_definition.add_container(
             "LivabilityContainer",
             image=image,
             logging=ecs.LogDrivers.aws_logs(stream_prefix="livability", log_group=log_group),
@@ -142,18 +182,22 @@ class LivabilityStack(cdk.Stack):
                 "S3_BUCKET": data_bucket,
                 "S3_REGION": data_region,
                 "ALERT_TOPIC_ARN": alert_topic.topic_arn,
+                "DAGSTER_STATE_DIR": "/opt/dagster/state",
                 "AWS_ACCESS_KEY_ID": "",
                 "AWS_SECRET_ACCESS_KEY": "",
             },
         )
+        container.add_mount_points(ecs.MountPoint(
+            container_path="/opt/dagster/state", source_volume="dagster-state", read_only=False,
+        ))
+        file_system.grant(task_definition.task_role, "elasticfilesystem:ClientMount", "elasticfilesystem:ClientWrite")
         alert_topic.grant_publish(task_definition.task_role)
         return task_definition
 
-    def _state_machine(self, vpc: ec2.Vpc, cluster: ecs.Cluster, task_definition: ecs.FargateTaskDefinition) -> sfn.StateMachine:
-        """ecs:runTask.sync on Fargate Spot, wrapped so a Spot interruption (or any
-        non-zero exit) relaunches the task until a run completes clean. Each relaunch
-        is cheap/idempotent — the S3 cache skips already-materialized work."""
-        task_sg = ec2.SecurityGroup(self, "LivabilityTaskSg", vpc=vpc, allow_all_outbound=True, description="Montreal livability monthly task")
+    def _state_machine(self, vpc: ec2.Vpc, cluster: ecs.Cluster, task_definition: ecs.FargateTaskDefinition, task_sg: ec2.SecurityGroup) -> sfn.StateMachine:
+        """ecs:runTask.sync on on-demand Fargate, wrapped so a transient placement/infra
+        failure relaunches the task. Each relaunch is cheap/idempotent - the S3 cache
+        skips already-materialized work and the EFS-persisted instance carries over."""
 
         run_task = sfn.CustomState(
             self,
@@ -164,7 +208,7 @@ class LivabilityStack(cdk.Stack):
                 "Parameters": {
                     "Cluster": cluster.cluster_arn,
                     "TaskDefinition": task_definition.task_definition_arn,
-                    "CapacityProviderStrategy": [{"CapacityProvider": "FARGATE_SPOT", "Weight": 1}],
+                    "LaunchType": "FARGATE",
                     "NetworkConfiguration": {
                         "AwsvpcConfiguration": {
                             "Subnets": [s.subnet_id for s in vpc.public_subnets],
@@ -173,11 +217,11 @@ class LivabilityStack(cdk.Stack):
                         }
                     },
                 },
-                # Spot interruption surfaces as States.TaskFailed; relaunch up to 10x.
-                # 10 straight Spot kills in one monthly run is effectively nil.
+                # On-demand: no Spot interruptions, so retries only cover transient
+                # placement/infra failures. A relaunch is still cheap and idempotent.
                 "Retry": [{
                     "ErrorEquals": ["States.TaskFailed", "States.Timeout"],
-                    "IntervalSeconds": 30, "MaxAttempts": 10, "BackoffRate": 1.5,
+                    "IntervalSeconds": 30, "MaxAttempts": 2, "BackoffRate": 1.5,
                 }],
             },
         )
@@ -213,7 +257,7 @@ class LivabilityStack(cdk.Stack):
 
     def _schedule(self, state_machine: sfn.StateMachine, schedule_expression: str, schedule_state: str) -> None:
         """Monthly EventBridge Scheduler -> Step Functions StartExecution (the state
-        machine owns task launch + Spot retries)."""
+        machine owns task launch + transient-failure retries)."""
         scheduler_role = iam.Role(self, "LivabilitySchedulerRole", assumed_by=iam.ServicePrincipal("scheduler.amazonaws.com"))
         scheduler_role.add_to_policy(iam.PolicyStatement(
             actions=["states:StartExecution"], resources=[state_machine.state_machine_arn],
