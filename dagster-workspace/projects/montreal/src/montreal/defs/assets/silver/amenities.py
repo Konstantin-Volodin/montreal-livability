@@ -14,6 +14,7 @@ from montreal.defs.assets.silver._config import (
     SilverAssetMetadata,
     points_with_lat_lng,
 )
+from montreal.defs.assets._cache import reuse_if_unchanged
 from montreal.defs.checks.factory import standard_checks
 from montreal.defs.resources.lakehouse import location_of, s3_datastore
 from montreal.defs.assets.silver.h3 import (
@@ -59,6 +60,8 @@ def _amenity_frame(gdf: gpd.GeoDataFrame, category: str | None = None) -> gpd.Ge
 )
 def amenities(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """amenity candidate points for nearest-distance search."""
+    if cached := reuse_if_unchanged(context):
+        return cached
     # read data
     osm_pois = s3_datastore.read_gpq(context, location_of(h3_montreal_osm_pois))
     transit = s3_datastore.read_gpq(context, location_of(h3_montreal_transit_stops))
@@ -88,7 +91,10 @@ def amenities(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> 
 
     # export
     stamp = s3_datastore.write_gpq(context, amenities)
-    return dg.MaterializeResult(data_version=dg.DataVersion(stamp) if stamp else None)
+    return dg.MaterializeResult(
+        data_version=dg.DataVersion(stamp) if stamp else None,
+        metadata={"s3_cache_hit": False},
+    )
 
 # asset checks
 checks = standard_checks(amenities, ASSET_DATA_CONTRACT)

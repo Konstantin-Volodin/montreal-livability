@@ -11,6 +11,7 @@ from montreal.defs.assets.silver._config import (
     SilverAssetMetadata,
     h3_linetrace,
 )
+from montreal.defs.assets._cache import reuse_if_unchanged
 from montreal.defs.checks.factory import standard_checks
 from montreal.defs.resources.lakehouse import location_of, s3_datastore
 
@@ -33,11 +34,16 @@ ASSET_DATA_CONTRACT = SilverAssetDataContract(
 @dg.asset(group_name="H3_indexed", metadata=asdict(ASSET_META), deps=[montreal_bike_paths], code_version=CODE_VERSION)
 def h3_montreal_bike_paths(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """h3-cover the montreal_bike_paths lines (linetrace); add h3_r10, one row per covered r10 cell"""
+    if cached := reuse_if_unchanged(context):
+        return cached
     gdf = s3_datastore.read_gpq(context, location_of(montreal_bike_paths))
     gdf = h3_linetrace(gdf)
     context.log.info(f"montreal_bike_paths: {len(gdf)} (path, r10 cell) rows H3-traced")
     stamp = s3_datastore.write_gpq(context, gdf)
-    return dg.MaterializeResult(data_version=dg.DataVersion(stamp) if stamp else None)
+    return dg.MaterializeResult(
+        data_version=dg.DataVersion(stamp) if stamp else None,
+        metadata={"s3_cache_hit": False},
+    )
 
 # asset checks
 checks = standard_checks(h3_montreal_bike_paths, ASSET_DATA_CONTRACT)
