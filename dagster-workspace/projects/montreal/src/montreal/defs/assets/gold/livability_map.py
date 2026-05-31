@@ -8,6 +8,7 @@ timestamp.
 
 from dataclasses import asdict
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import dagster as dg
 import h3
@@ -83,7 +84,7 @@ def livability_map(
 ) -> dg.MaterializeResult:
     """HTML livability report: summary pills, municipality ranking, embedded map (gold)."""
     scores = s3_datastore.read_gpq(context, location_of(livability_score))
-    amenities = s3_datastore.read_gpq(context, location_of(amenities))
+    amenities_gdf = s3_datastore.read_gpq(context, location_of(amenities))
     boundaries = s3_datastore.read_gpq(context, location_of(montreal_municipalities))
 
     hexes = _agg_hexes(scores, 9)
@@ -91,11 +92,11 @@ def livability_map(
 
     stats = {
         "addresses": int(scores["n_addresses"].sum()),
-        "amenities": int(len(amenities)),
-        "by_category": amenities["category"].value_counts().to_dict(),
+        "amenities": int(len(amenities_gdf)),
+        "by_category": amenities_gdf["category"].value_counts().to_dict(),
         "mean_livability": float(scores["livability"].mean()),
         "municipalities": int(table["municipality"].nunique()),
-        "updated_on": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        "updated_on": datetime.now(ZoneInfo("America/Toronto")).strftime("%Y-%m-%d"),
     }
 
     context.log.info(

@@ -1,0 +1,480 @@
+:root {
+  --ink:#0e1722;
+  --muted:#5c6775;
+  --faint:#8a95a3;
+  --line:#e3e9f1;
+  --line-soft:#eef2f7;
+  --paper:#ffffff;
+  --bg:#eef1f6;
+  --red:#e21b2d;
+  --blue:#0057b8;
+  --green:#0f766e;
+  --yellow:#ffcf3f;
+  --amber:#b9760a;
+  --radius:16px;
+  --radius-sm:11px;
+  --shadow:0 1px 2px rgba(16,24,32,.04), 0 18px 46px rgba(16,24,32,.07);
+  --shadow-sm:0 1px 2px rgba(16,24,32,.04), 0 8px 22px rgba(16,24,32,.05);
+  --map-h:clamp(540px, 72vh, 840px);
+}
+* { box-sizing:border-box; }
+html, body { margin:0; min-height:100%; }
+body {
+  color:var(--ink);
+  background:
+    radial-gradient(1100px 460px at 84% -8%, rgba(0,87,184,.06), transparent 60%),
+    radial-gradient(900px 420px at -6% 4%, rgba(226,27,45,.05), transparent 58%),
+    var(--bg);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:14px;
+  -webkit-font-smoothing:antialiased;
+  cursor:default;  /* arrow over text/controls; links keep the UA pointer */
+}
+a { color:var(--blue); text-decoration:none; }
+a:hover { text-decoration:underline; }
+:focus-visible { outline:2px solid var(--blue); outline-offset:2px; border-radius:3px; }
+.wrap { max-width:1500px; margin:0 auto; padding:56px 32px 72px; }
+
+/* hero */
+.hero {
+  position:relative;
+  display:grid;
+  gap:28px;
+  grid-template-columns:minmax(0, 1fr);
+  align-items:end;
+  padding:6px 0 8px;
+}
+/* Faint H3-hexagon field, echoing the map's cells, fading from the top-right corner. */
+.hero::before {
+  content:"";
+  position:absolute;
+  inset:-44px -30px auto auto;
+  width:min(560px, 56%);
+  height:320px;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='49' viewBox='0 0 28 49'%3E%3Cpath fill='%230057b8' fill-opacity='0.08' fill-rule='evenodd' d='M13.99 9.25l13 7.5v15l-13 7.5L1 31.75v-15l12.99-7.5zM3 17.9v12.7l10.99 6.34 11-6.35V17.9l-11-6.34L3 17.9zM0 15l12.98-7.5V0h-2v6.35L0 12.69v2.3zm0 18.5L12.98 41v8h-2v-6.85L0 35.81v-2.3zM15 0v7.5L27.99 15H28v-2.31h-.01L17 6.35V0h-2zm0 49v-8l12.99-7.5H28v2.31h-.01L17 42.15V49h-2z'/%3E%3C/svg%3E");
+  -webkit-mask-image:radial-gradient(125% 125% at 100% 0, #000, transparent 68%);
+  mask-image:radial-gradient(125% 125% at 100% 0, #000, transparent 68%);
+  pointer-events:none;
+  z-index:0;
+}
+.hero > * { position:relative; z-index:1; }
+.hero-tag {
+  display:inline-flex;
+  align-items:center;
+  gap:9px;
+  margin:0 0 18px;
+  color:var(--muted);
+  font-size:12px;
+  font-weight:800;
+  letter-spacing:.12em;
+  text-transform:uppercase;
+}
+.hero-tag::before {
+  content:"";
+  width:34px;
+  height:6px;
+  border-radius:3px;
+  background:linear-gradient(90deg, var(--red), var(--blue), var(--yellow), var(--green));
+}
+.hero-meta {
+  align-self:end;
+  justify-self:start;
+  padding:7px 13px;
+  border:1px solid var(--line);
+  border-radius:999px;
+  background:var(--paper);
+  box-shadow:var(--shadow-sm);
+  color:var(--muted);
+  font-size:11px;
+  font-weight:800;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  white-space:nowrap;
+}
+h1 {
+  max-width:900px;
+  margin:0;
+  font-size:clamp(38px, 5.2vw, 78px);
+  font-weight:800;
+  letter-spacing:-.015em;
+  line-height:.95;
+}
+.lede {
+  max-width:720px;
+  margin:22px 0 0;
+  color:#3a4550;
+  font-size:18px;
+  line-height:1.58;
+}
+.lede-en {
+  max-width:680px;
+  margin:10px 0 0;
+  color:var(--faint);
+  font-size:14px;
+  line-height:1.55;
+}
+@media (min-width:980px) {
+  .hero { grid-template-columns:minmax(0, 1fr) auto; }
+}
+
+/* shared section label (bilingual: French primary + muted English) */
+.section-label {
+  display:flex;
+  align-items:center;
+  gap:11px;
+  margin:0 0 10px;
+  color:#1d2733;
+  font-size:13px;
+  font-weight:800;
+  letter-spacing:.07em;
+  text-transform:uppercase;
+}
+.section-label::before {
+  content:"";
+  flex:0 0 18px;
+  height:16px;
+  background:var(--red);
+  clip-path:polygon(25% 0, 75% 0, 100% 50%, 75% 100%, 25% 100%, 0 50%);
+}
+.section-label span {
+  color:var(--faint);
+  font-weight:700;
+}
+.section-label span::before {
+  content:"·";
+  margin:0 .5em;
+  color:#c4ccd6;
+}
+
+/* overview: stats + amenities */
+.overview {
+  display:grid;
+  gap:30px;
+  grid-template-columns:minmax(0, 1fr);
+  margin-top:56px;
+}
+@media (min-width:980px) {
+  .overview { grid-template-columns:minmax(0, .82fr) minmax(360px, 1fr); align-items:stretch; }
+}
+.stats {
+  display:grid;
+  gap:16px;
+  grid-template-columns:repeat(2, minmax(0, 1fr));
+}
+.stat {
+  position:relative;
+  padding:22px 20px 20px;
+  overflow:hidden;
+  background:var(--paper);
+  border:1px solid var(--line);
+  border-radius:var(--radius-sm);
+  box-shadow:var(--shadow-sm);
+}
+.stat::before {
+  content:"";
+  position:absolute;
+  top:0; left:0;
+  width:100%;
+  height:4px;
+  background:var(--accent, var(--blue));
+}
+.stat b {
+  display:block;
+  font-size:clamp(30px, 3.4vw, 46px);
+  font-weight:800;
+  letter-spacing:-.02em;
+  line-height:1;
+  color:var(--accent, var(--ink));
+}
+.stat span {
+  display:block;
+  margin-top:10px;
+  color:var(--muted);
+  font-size:12px;
+  font-weight:700;
+  letter-spacing:.04em;
+  text-transform:uppercase;
+}
+.stat:nth-child(1) { --accent:var(--red); }
+.stat:nth-child(2) { --accent:var(--blue); }
+.stat:nth-child(3) { --accent:var(--green); }
+.stat:nth-child(4) { --accent:var(--amber); }
+
+.amenities {
+  display:flex;
+  flex-direction:column;
+  gap:14px;
+  padding:24px 24px 22px;
+  background:var(--paper);
+  border:1px solid var(--line);
+  border-radius:var(--radius-sm);
+  box-shadow:var(--shadow-sm);
+}
+.amenity-row {
+  display:grid;
+  grid-template-columns:minmax(110px, 1fr) minmax(120px, 2fr) 70px;
+  gap:14px;
+  align-items:center;
+  color:#303a46;
+}
+.amenity-row span {
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  font-weight:600;
+}
+.amenity-row b {
+  text-align:right;
+  font-size:13px;
+  font-variant-numeric:tabular-nums;
+}
+.amenity-track {
+  height:10px;
+  overflow:hidden;
+  background:#eef2f7;
+  border-radius:999px;
+}
+.amenity-track i {
+  display:block;
+  width:var(--share);
+  height:100%;
+  border-radius:999px;
+  background:var(--blue);
+}
+.amenity-row:nth-child(3n) .amenity-track i { background:var(--red); }
+.amenity-row:nth-child(3n + 1) .amenity-track i { background:var(--green); }
+.amenity-row:nth-child(3n + 2) .amenity-track i { background:var(--amber); }
+
+/* explorer: full-width map, then the ranking table stacked below it */
+.explorer { margin-top:72px; }
+.ranking-label { margin-top:52px; }
+.view-copy {
+  max-width:760px;
+  margin:0 0 14px;
+  color:var(--muted);
+  font-size:13px;
+  line-height:1.55;
+}
+
+.map-frame,
+.table-frame {
+  position:relative;
+  overflow:hidden;
+  background:var(--paper);
+  border:1px solid var(--line);
+  border-radius:var(--radius);
+  box-shadow:var(--shadow);
+}
+.table-frame::after {
+  content:"";
+  position:absolute;
+  top:0; right:0; bottom:0;
+  width:28px;
+  pointer-events:none;
+  background:linear-gradient(90deg, rgba(255,255,255,0), rgba(255,255,255,.94));
+}
+.map-tools {
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:8px 10px;
+  padding:13px 16px;
+  border-bottom:1px solid var(--line);
+  color:#2c3440;
+  font-size:13px;
+}
+.tool-label {
+  margin-right:2px;
+  color:var(--muted);
+  font-weight:800;
+  letter-spacing:.06em;
+  text-transform:uppercase;
+}
+.map-tools label {
+  display:inline-flex;
+  align-items:center;
+  gap:7px;
+  padding:5px 11px;
+  white-space:nowrap;
+  user-select:none;
+  border:1px solid var(--line);
+  border-radius:999px;
+  background:#f8fafc;
+  transition:background .12s, border-color .12s, color .12s;
+}
+.map-tools label:hover { background:#eef4fb; border-color:#cdd9e6; }
+/* Active layer reads at a glance: checked pills tint blue. */
+.map-tools label:has(input:checked) {
+  color:var(--blue);
+  font-weight:700;
+  background:#eaf3fd;
+  border-color:#9cc2ea;
+}
+.map-tools input {
+  width:14px;
+  height:14px;
+  margin:0;
+  accent-color:var(--blue);
+}
+.map {
+  display:block;
+  width:100%;
+  height:var(--map-h);
+  border:0;
+  background:#fff;
+}
+
+/* ranking table */
+.table-scroll {
+  max-height:560px;
+  overflow:auto;
+  -webkit-overflow-scrolling:touch;
+}
+table {
+  width:100%;
+  border-collapse:separate;
+  border-spacing:0;
+  font-size:13px;
+}
+th, td {
+  padding:11px 14px;
+  text-align:right;
+  white-space:nowrap;
+  border-bottom:1px solid var(--line-soft);
+  font-variant-numeric:tabular-nums;
+}
+th:nth-child(2),
+td.muni { text-align:left; }
+th:nth-child(1), td:nth-child(1),
+th:nth-child(2), td:nth-child(2),
+th:nth-child(3), td:nth-child(3),
+th:nth-child(4), td:nth-child(4) {
+  position:sticky;
+  background:var(--paper);
+}
+th:nth-child(1), td:nth-child(1) { left:0; z-index:3; min-width:54px; }
+th:nth-child(2), td:nth-child(2) { left:54px; z-index:3; min-width:260px; }
+th:nth-child(3), td:nth-child(3) { left:314px; z-index:3; min-width:112px; }
+th:nth-child(4), td:nth-child(4) { left:426px; z-index:3; min-width:104px; }
+th {
+  position:sticky;
+  top:0;
+  z-index:4;
+  color:#536070;
+  background:#f6f8fb;
+  font-size:11px;
+  font-weight:800;
+  letter-spacing:.04em;
+  text-transform:uppercase;
+  border-bottom:1px solid var(--line);
+}
+th:nth-child(-n+4) { z-index:5; background:#f6f8fb; }
+tbody tr:hover, tbody tr.is-active { background:#eaf4ff; }
+tbody tr:hover td, tbody tr.is-active td { background:#eaf4ff; }
+tbody tr.is-active td.muni { color:var(--blue); }
+tbody tr:last-child td { border-bottom:0; }
+td.muni {
+  max-width:280px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  font-weight:700;
+}
+td.rank {
+  color:var(--faint);
+  font-weight:700;
+}
+td.liv {
+  box-shadow:inset 5px 0 var(--score-color);
+  font-weight:800;
+}
+
+/* footer */
+.foot {
+  display:grid;
+  gap:40px;
+  grid-template-columns:minmax(0, 1fr);
+  margin-top:88px;
+  padding:40px 0 0;
+  border-top:1px solid var(--line);
+  color:var(--muted);
+  font-size:12px;
+  line-height:1.5;
+}
+@media (min-width:900px) {
+  .foot { grid-template-columns:minmax(0, 1fr) auto; align-items:end; gap:48px 72px; }
+  .foot-credit { text-align:right; }
+}
+.foot-title {
+  margin:0 0 18px;
+  color:#3d4652;
+  font-size:11px;
+  font-weight:800;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+}
+.foot-title span { color:var(--faint); font-weight:700; }
+.foot-title span::before { content:"·"; margin:0 .4em; color:#c4ccd6; }
+
+/* credit block: just name + repo */
+.foot-by { margin:0; }
+.foot-by b { color:#3d4652; font-weight:700; }
+.foot-repo {
+  display:inline-block;
+  margin-top:8px;
+  color:var(--muted);
+  font-weight:600;
+}
+.foot-repo:hover { color:var(--blue); }
+
+/* data sources: grouped by provider, clustered left so there's no dead space */
+.sources {
+  display:flex;
+  flex-wrap:wrap;
+  gap:24px 56px;
+  margin:0;
+  padding:0;
+  list-style:none;
+}
+.sources li {
+  max-width:260px;
+  padding-left:14px;
+  border-left:2px solid var(--line);
+}
+.sources a {
+  display:inline-block;
+  color:#2c3440;
+  font-size:14px;
+  font-weight:700;
+}
+.sources a:hover { color:var(--blue); }
+.src-meta {
+  display:block;
+  margin-top:5px;
+  color:var(--faint);
+  font-size:12px;
+  line-height:1.5;
+}
+
+/* mobile */
+@media (max-width:760px) {
+  .wrap { padding:32px 16px 48px; }
+  .hero { padding-bottom:8px; }
+  .overview { gap:24px; margin-top:40px; }
+  .stats { gap:12px; }
+  .stat { padding:18px 16px 16px; }
+  .amenities { padding:20px 18px; }
+  .explorer { margin-top:48px; }
+  .ranking-label { margin-top:36px; }
+  .foot { margin-top:56px; padding-top:32px; gap:32px; }
+  .sources { gap:20px 32px; }
+  .map { height:clamp(440px, 72vh, 620px); }
+  th, td { padding:8px 10px; }
+  /* Phones are too narrow for 4 pinned columns. Pin only rank + municipality, hide
+     Addresses, and unpin Livability so the headline score is visible immediately. */
+  th:nth-child(1), td:nth-child(1) { min-width:38px; }
+  th:nth-child(2), td:nth-child(2) { left:38px; min-width:128px; }
+  th:nth-child(3), td:nth-child(3) { display:none; }
+  th:nth-child(4), td:nth-child(4) { position:static; min-width:74px; }
+  td.muni { max-width:128px; }
+}

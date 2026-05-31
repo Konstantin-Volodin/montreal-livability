@@ -29,12 +29,15 @@ TABLE_LABELS = {
 }
 # Same blend weights the scoring asset uses, keyed by score column.
 SCORE_WEIGHTS = {f"score_{c}": w for c, w in DEFAULT_WEIGHTS.items()}
+TEMPLATES = Path(__file__).parent / "templates"
 ENV = Environment(
-    loader=FileSystemLoader(Path(__file__).parent / "templates"),
+    loader=FileSystemLoader(TEMPLATES),
     autoescape=select_autoescape(["html"]),
     trim_blocks=True,
     lstrip_blocks=True,
 )
+# Inlined into report.html so the deployed S3 artifact stays a single self-contained file.
+REPORT_CSS = (TEMPLATES / "report.css").read_text(encoding="utf-8")
 COLORMAP = cm.LinearColormap(
     ["#d7191c", "#fdae61", "#ffffbf", "#a6d96a", "#1a9641"],
     vmin=0.0,
@@ -204,6 +207,7 @@ def render_report(*, stats: dict, table: pd.DataFrame, map_html: str) -> str:
     ]
 
     return ENV.get_template("report.html").render(
+        styles=REPORT_CSS,
         summary_stats=summary_stats,
         category_stats=category_stats,
         columns=columns,

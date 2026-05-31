@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 from shapely.geometry import Point, Polygon, box
 
-from montreal.defs.assets.gold import livability_map, livability_score
+from montreal.defs.assets.gold import livability_map, livability_score, report
 from montreal.defs.assets.gold._config import (
     DEFAULT_WEIGHTS,
     SCORE_COLUMNS,
@@ -132,9 +132,6 @@ class FakeStore(s3_datastore):
     def read_gpq_prefix(self, context, prefix):
         return _FRAME
 
-    def write_check_result(self, context, asset_location, check_name, result):  # no S3 in tests
-        pass
-
 
 @dg.asset(name="gold_fixture", metadata={"layer": "gold", "segmentation": "snapshot"})
 def gold_fixture(context, s3_datastore: s3_datastore) -> dg.MaterializeResult:
@@ -198,3 +195,72 @@ def test_livability_map_is_a_terminal_artifact_without_contract_or_checks():
     # HTML report: no geoparquet to validate, so no data contract / checks.
     assert not hasattr(livability_map, "ASSET_DATA_CONTRACT")
     assert not hasattr(livability_map, "checks")
+
+
+# --- report HTML rendering ------------------------------------------------
+
+
+def _report_table() -> pd.DataFrame:
+    """An already-aggregated municipality table, the shape render_report consumes."""
+    scores = {f"score_{c}": float(i * 10) for i, c in enumerate(POI_CATEGORIES, 1)}
+    return pd.DataFrame([
+        {"municipality": "Le Plateau-Mont-Royal", "addresses": 42000, "livability": 88.0, **scores},
+        {"municipality": "Verdun", "addresses": 30000, "livability": 71.5, **scores},
+    ])
+
+
+def _report_stats() -> dict:
+    return {
+        "addresses": 512288,
+        "amenities": 25039,
+        "municipalities": 34,
+        "mean_livability": 72.7,
+        "by_category": {c: 1000 for c in POI_CATEGORIES},
+        "updated_on": "2026-05-31 12:00 UTC",
+    }
+
+
+def _render() -> str:
+    return report.render_report(stats=_report_stats(), table=_report_table(), map_html="MAPMARKER")
+
+
+def test_render_report_inlines_the_stylesheet_unescaped():
+    html = _render()
+    # The standalone S3 artifact carries its CSS inline; the |safe filter keeps it intact.
+    assert "<style>" in html and "box-sizing:border-box" in html
+    assert 'content:""' in html  # not HTML-escaped to content:&#34;&#34;
+
+
+def test_render_report_carries_bilingual_labels_and_hex_motif():
+    html = _render()
+    for label in ("Données ouvertes", "Commodités", "Carte", "Classement"):
+        assert label in html
+    assert "clip-path:polygon" in html  # hex section bullets
+    assert "image/svg+xml" in html  # hero hex-grid field
+
+
+def test_render_report_emits_one_ranking_row_per_municipality():
+    html = _render()
+    assert html.count('data-municipality-key="') == len(_report_table())
+    assert "Le Plateau-Mont-Royal" in html and "Verdun" in html
+    assert "MAPMARKER" in html  # map html embedded into the iframe srcdoc
+
+
+def test_render_report_stacks_the_ranking_table_below_the_map():
+    html = _render()
+    # Map and ranking table are both always shown; the map sits above the table.
+    assert 'class="map-frame"' in html and 'class="table-frame"' in html
+    assert html.index('class="map-frame"') < html.index('class="table-frame"')
+    assert "scrollIntoView" in html  # clicking a row still flies the map to it
+
+
+def test_preview_builds_a_full_report_with_a_real_map():
+    """End-to-end render through build_map_html (folium), and refresh the openable
+    preview_report.html as a side benefit of running the suite."""
+    from tests import preview
+
+    out = preview.write_preview()
+    html = out.read_text(encoding="utf-8")
+    assert "leaflet" in html.lower()  # a real interactive map, not a placeholder
+    assert html.count('data-municipality-key="') == len(preview.MUNIS)  # one ranking row per muni
+    assert "Carte" in html and "Classement" in html  # bilingual labels survive the full path
