@@ -45,6 +45,29 @@ def _read_checked(context, s3_datastore, asset: dg.AssetsDefinition):
     return s3_datastore.read_gpq_prefix(context, location)
 
 
+def _checked_location(context, asset: dg.AssetsDefinition) -> str:
+    """Where this run's check results are saved -- the partition's own shard dir, else the
+    asset base. Mirrors `_read_checked` so each partition saves beside the shard it validated
+    instead of every partition clobbering one shared ``_checks`` dir."""
+    location = location_of(asset)
+    return f"{location}/{context.partition_key}" if context.has_partition_key else location
+
+
+def _reused_snapshot(context, asset: dg.AssetsDefinition) -> bool:
+    """True when the asset's latest materialization just re-emitted a cached snapshot
+    (bronze freshness hit, ``s3_cache_hit``): the data is unchanged, so its prior check
+    results still stand and the checks need not re-read + re-evaluate.
+
+    Partition-scoped: a partitioned asset checks one shard per run, so read that
+    partition's own latest materialization -- not whichever partition happened to
+    materialize last (which is what an unpartitioned lookup would return)."""
+    partition_key = context.partition_key if context.has_partition_key else None
+    record = context.instance.get_latest_data_version_record(asset.key, partition_key=partition_key)
+    materialization = record.event_log_entry.asset_materialization if record else None
+    flag = materialization.metadata.get("s3_cache_hit") if materialization else None
+    return bool(getattr(flag, "value", flag))
+
+
 # --- individual contract assertions: pure ``df -> AssetCheckResult`` -------
 
 def _schema_contract_result(df, schema: dict[str, str]) -> dg.AssetCheckResult:
@@ -153,8 +176,25 @@ def standard_checks(asset: dg.AssetsDefinition, contract) -> list:
 
     @dg.multi_asset_check(specs=specs, name=f"{asset.key.path[-1]}_contract_checks")
     def _checks(context: dg.AssetCheckExecutionContext, s3_datastore: s3_datastore):
+        location = _checked_location(context, asset)
+
+        # Asset re-emitted its cached snapshot (bronze freshness hit): the data is unchanged,
+        # so re-emit the prior verdicts rather than re-reading + re-evaluating S3. (A multi-check
+        # must yield every spec, so this only short-circuits when all priors are on hand.)
+        if _reused_snapshot(context, asset):
+            prior = {spec.key.name: s3_datastore.read_check_result(location, spec.key.name) for spec in specs}
+            if all(prior.values()):
+                context.log.info(f"{asset.key.to_user_string()} reused its snapshot; re-emitting {len(prior)} prior check result(s)")
+                for name, saved in prior.items():
+                    yield dg.AssetCheckResult(
+                        check_name=name,
+                        passed=bool(saved["passed"]),
+                        severity=dg.AssetCheckSeverity(saved["severity"]) if saved.get("severity") else dg.AssetCheckSeverity.ERROR,
+                        metadata={"reused_snapshot": True},
+                    )
+                return
+
         df = _read_checked(context, s3_datastore, asset)
-        location = location_of(asset)
         results = [
             _schema_contract_result(df, contract.schema),
             _row_uniqueness_result(df, contract.uniqueness),

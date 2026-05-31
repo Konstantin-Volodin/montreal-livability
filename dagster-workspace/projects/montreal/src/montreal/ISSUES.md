@@ -74,19 +74,27 @@ redownload, which writes a new stamp -> new `DataVersion` -> the dependent
 silver/gold input-version hash changes -> they recompute. Per-asset granularity
 falls out for free (fresh-bronze-fed assets skip; changed-bronze-fed assets run).
 
-### Scope / what is intentionally NOT gated
-The gate reconstructs each upstream's current version from its latest record,
-which is **not** the aggregate version Dagster records for a *partitioned*
-upstream. So the gate is applied only to **unpartitioned assets with unpartitioned
-upstreams** (the six h3/silver assets + `amenities` + `montreal_municipalities`).
-Left always-recompute for now:
-- `distances_to_amenities` — partitioned by r6.
-- `livability_score` — unpartitioned but depends on the partitioned distances.
+### Scope / what is gated
+The gate keys off each **unpartitioned upstream's** current data version, and is
+**partition-aware on the downstream side** (it scopes its own-record lookup to
+`context.partition_key`, so each shard skips independently). Gated:
+- the six h3/silver assets + `amenities` + `montreal_municipalities` — unpartitioned.
+- `distances_to_amenities` — partitioned by r6; each shard reuses its prior
+  snapshot when neither unpartitioned upstream (`h3_montreal_addresses`,
+  `amenities`) changed.
+
+It deliberately does **not** key off a *partitioned upstream*. Dagster records
+that input as a sha256 aggregate over all partition versions
+(`DataVersionCache._get_partitions_data_version_from_keys`), which a single
+latest-record read does not reconstruct — so such an upstream never matches and
+the gate falls through to recompute (safe, never a false hit). Left
+always-recompute:
+- `livability_score` — unpartitioned, but depends on the partitioned
+  `distances_to_amenities`. Re-deriving Dagster's aggregate ourselves is fragile
+  (a >=100-partition threshold silently switches it to a single-partition
+  version, plus partition-mapping/sort coupling), so it is out of scope.
 - `livability_map` — deliberately re-renders every run for a fresh "updated on"
   timestamp (no checks, no data contract).
-
-Extending the gate to the partitioned cases is the natural follow-up (it needs the
-partition-aware aggregate input version, verified against Dagster's provenance).
 
 ### Tests
 - `tests/test_provenance_probe.py` — pins the load-bearing assumption that a
@@ -94,3 +102,10 @@ partition-aware aggregate input version, verified against Dagster's provenance).
 - `tests/test_cache_gate.py` — end-to-end against a durable temp-dir instance:
   first run computes, unchanged second run hits cache (compute skipped), an
   upstream version change forces recompute.
+- `tests/test_provenance_probe_partitioned.py` — pins the two partitioned shapes:
+  (A) a partitioned downstream records its unpartitioned upstreams verbatim in
+  per-partition provenance; (B) a partitioned upstream is recorded as a sha256
+  aggregate that a bare latest-record read cannot reconstruct.
+- `tests/test_cache_gate_partitioned.py` — the per-partition gate end-to-end:
+  partitions skip independently, a shard still hits after a *different* shard
+  materializes in between, and a shard recomputes once its upstream moves.

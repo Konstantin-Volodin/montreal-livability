@@ -14,10 +14,16 @@ materialization, the data versions of the upstreams the asset consumed
 those against the upstreams' current data versions answers "did anything I
 depend on change?" without any hand-rolled bookkeeping.
 
-Scope: unpartitioned assets whose upstreams are unpartitioned. For a partitioned
-upstream Dagster records a single aggregate input version that this helper does
-not reconstruct, so partitioned assets (and assets that depend on one) must not
-use the gate -- they fall through and recompute.
+Scope: the gate keys off each *unpartitioned* upstream's current data version.
+It is partition-aware on the *downstream* side -- a partitioned asset compares
+its own per-partition provenance, so each r6 shard skips independently. But it
+cannot key off a *partitioned upstream*: Dagster records that input as a sha256
+aggregate over all partition versions (see ``DataVersionCache``), which a single
+latest-record read does not reconstruct. Such an upstream simply never matches,
+so the gate falls through to recompute -- safe, never a false hit. That is why
+``livability_score`` (depends on the partitioned ``distances_to_amenities``) is
+left always-recompute, while ``distances_to_amenities`` itself (partitioned, but
+with unpartitioned upstreams) is gated per partition.
 """
 
 import dagster as dg
@@ -43,9 +49,15 @@ def reuse_if_unchanged(context: dg.AssetExecutionContext) -> dg.MaterializeResul
     instance = context.instance
     asset_key = context.asset_key
 
-    # This asset's last materialization: its provenance carries both halves of
-    # the cache key (the input versions it consumed + the code version it ran).
-    own_record = instance.get_latest_data_version_record(asset_key)
+    # For a partitioned asset each r6 shard runs as its own step with its own
+    # provenance, so the cache key must be scoped to this partition -- otherwise
+    # we'd compare against whichever partition happened to materialize last.
+    partition_key = context.partition_key if context.has_partition_key else None
+
+    # This asset's last materialization (this partition's, if partitioned): its
+    # provenance carries both halves of the cache key (the input versions it
+    # consumed + the code version it ran).
+    own_record = instance.get_latest_data_version_record(asset_key, partition_key=partition_key)
     if own_record is None:
         return None
     provenance = extract_data_provenance_from_entry(own_record.event_log_entry)

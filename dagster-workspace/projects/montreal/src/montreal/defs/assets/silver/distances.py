@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from montreal import __version__ as CODE_VERSION
+from montreal.defs.assets._cache import reuse_if_unchanged
 from montreal.defs.assets.silver.h3 import h3_montreal_addresses
 from montreal.defs.assets.silver.amenities import amenities
 from montreal.defs.assets.silver._config import (
@@ -127,6 +128,11 @@ def nearest(addr_df, amenity_df, max_k=10, log=None) -> pd.DataFrame:
 )
 def distances_to_amenities(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
     """Nearest amenity distance per Montreal address and livability category."""
+    # Per-partition gate: if neither upstream (both unpartitioned) changed and the
+    # code version held, this r6 shard's prior snapshot is reused -- skipping the
+    # ring search for every address in the cell.
+    if cached := reuse_if_unchanged(context):
+        return cached
     addresses = s3_datastore.read_gpq(context, f"{location_of(h3_montreal_addresses)}/{context.partition_key}")
     amenity_points = s3_datastore.read_gpq(context, location_of(amenities))
 
@@ -139,7 +145,10 @@ def distances_to_amenities(context: dg.AssetExecutionContext, s3_datastore: s3_d
 
     context.log.info(f"distances_to_amenities: {len(out)} address rows with {len(distance_df.columns)} distance columns")
     stamp = s3_datastore.write_gpq(context, out)
-    return dg.MaterializeResult(data_version=dg.DataVersion(stamp) if stamp else None)
+    return dg.MaterializeResult(
+        data_version=dg.DataVersion(stamp) if stamp else None,
+        metadata={"s3_cache_hit": False},
+    )
 
 # asset checks
 checks = standard_checks(distances_to_amenities, ASSET_DATA_CONTRACT)
