@@ -61,7 +61,7 @@
       </div>
 
       <h2 class="section-label ranking-label">Classement <span>Ranking</span></h2>
-      <p class="view-copy">{{ municipality_count }} municipalities ordered by livability score. Click a row to see it on the map.</p>
+      <p class="view-copy">{{ municipality_count }} municipalities ordered by livability score. Hover a row to highlight it on the map; click to pin it.</p>
       <div class="table-frame">
         <div class="table-scroll">
           <table>
@@ -192,10 +192,23 @@
 
     var mapFrame = document.getElementById("livability-map");
 
-    // Click a municipality -> pin it, fit the map to it, and scroll the map into view.
+    function restoreSelection() {
+      if (selectedMunicipalityKey) highlight(selectedMunicipalityKey, false);
+      else sendToMap({ type: "clear-municipality-highlight" });
+    }
+
     rows.forEach(function (tr) {
+      var key = tr.getAttribute("data-municipality-key");
+
+      // Hover -> preview the municipality on the map (no zoom, doesn't disturb the pin).
+      tr.addEventListener("mouseenter", function () {
+        highlight(key, false);
+      });
+      tr.addEventListener("mouseleave", restoreSelection);
+
+      // Click -> pin it, fit the map to it, and scroll the map into view.
       tr.addEventListener("click", function () {
-        selectedMunicipalityKey = tr.getAttribute("data-municipality-key");
+        selectedMunicipalityKey = key;
         setActiveRow(selectedMunicipalityKey);
         highlight(selectedMunicipalityKey, true);
         if (mapFrame && mapFrame.scrollIntoView) {
