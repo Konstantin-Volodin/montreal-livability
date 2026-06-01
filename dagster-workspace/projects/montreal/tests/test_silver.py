@@ -41,7 +41,6 @@ SILVER_MODULES = [
 MONTREAL = (45.5, -73.6)  # (lat, lng)
 
 
-# --- shared geo helpers ---------------------------------------------------
 
 
 def test_h3_index_adds_r10_cell_for_each_point():
@@ -75,13 +74,11 @@ def test_poi_categories_and_partition_name_are_stable():
     assert r6_partitions.name == "address_r6"
 
 
-# --- distance search ------------------------------------------------------
 
 
 def test_haversine_zero_for_identical_points_and_known_arc():
     z = np.array([0.0])
     assert haversine(z, z, z, z)[0] == 0.0
-    # one degree of longitude at the equator ~ 111.3 km on the equatorial radius.
     d = haversine(np.array([0.0]), np.array([0.0]), np.array([1.0]), np.array([0.0]))
     assert d[0] == pytest.approx(111_319, rel=1e-3)
 
@@ -90,7 +87,6 @@ def test_nearest_finds_same_cell_amenity_and_leaves_empty_categories_nan():
     lat, lng = MONTREAL
     cell = h3.latlng_to_cell(lat, lng, 10)
     addresses = pd.DataFrame({"h3_r10": [cell], "lat": [lat], "lng": [lng]})
-    # one grocery point in the address's own cell -> found at ring k=0.
     amenity = pd.DataFrame(
         {"category": ["grocery"], "h3_r10": [cell], "lat": [lat + 1e-4], "lng": [lng + 1e-4]}
     )
@@ -99,11 +95,10 @@ def test_nearest_finds_same_cell_amenity_and_leaves_empty_categories_nan():
 
     assert set(out.columns) == {f"dist_{c}" for c in POI_CATEGORIES}
     assert np.isfinite(out["dist_grocery"].iloc[0])
-    assert out["dist_grocery"].iloc[0] < 200  # metres, same-cell neighbour
-    assert np.isnan(out["dist_school"].iloc[0])  # no school points -> unresolved
+    assert out["dist_grocery"].iloc[0] < 200
+    assert np.isnan(out["dist_school"].iloc[0])
 
 
-# --- amenity reshape ------------------------------------------------------
 
 
 def _candidate_frame() -> gpd.GeoDataFrame:
@@ -126,12 +121,9 @@ def test_amenity_frame_overrides_category_when_given():
     assert (out["category"] == "transit").all()
 
 
-# --- partitioned-asset checks read one shard ------------------------------
 
 
 class _RecordingStore:
-    """Records which read the check routed to, standing in for s3_datastore."""
-
     def __init__(self):
         self.reads: list[tuple[str, str]] = []
 
@@ -149,21 +141,17 @@ class _Ctx:
 
 
 def test_partitioned_check_reads_only_its_partition_shard():
-    # distances_to_amenities is r6-partitioned: a check run scoped to one partition
-    # must validate just that partition's shard, not concat every shard.
     store = _RecordingStore()
     _read_checked(_Ctx(partition_key="861f1d8c7"), store, distances_to_amenities)
     assert store.reads == [("read_gpq", "silver/distances_to_amenities/861f1d8c7")]
 
 
 def test_unpartitioned_sharded_check_reads_all_shards():
-    # No partition scope + a sharded asset (segmentation=h3_r6) -> one pass over every shard.
     store = _RecordingStore()
     _read_checked(_Ctx(), store, distances_to_amenities)
     assert store.reads == [("read_gpq_prefix", "silver/distances_to_amenities")]
 
 
-# --- per-module contract sanity -------------------------------------------
 
 
 @pytest.mark.parametrize("module", SILVER_MODULES, ids=lambda m: m.__name__.split(".")[-1])
@@ -173,11 +161,10 @@ def test_each_silver_module_has_a_coherent_contract(module):
 
     assert meta.layer == "silver"
     schema_cols = set(contract.schema)
-    assert set(contract.uniqueness) <= schema_cols  # keys must be declared columns
+    assert set(contract.uniqueness) <= schema_cols
     assert set(contract.completeness) <= schema_cols
-    assert not hasattr(contract, "bounds")  # silver carries no value bounds (that's gold)
+    assert not hasattr(contract, "bounds")
 
-    # Exactly the three shape checks (no value_range), all bound to one asset.
     names = {key.name for c in module.checks for key in c.check_keys}
     assert names == {"schema_contract", "row_uniqueness", "field_completeness"}
     asset_keys = {key.asset_key for c in module.checks for key in c.check_keys}

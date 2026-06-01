@@ -15,7 +15,6 @@ from montreal.defs.assets._cache import reuse_if_unchanged
 from montreal.defs.checks.factory import standard_checks
 from montreal.defs.resources.lakehouse import location_of, s3_datastore
 
-# metadata
 ASSET_META = SilverAssetMetadata(
     layer="silver",
     data_category="geospatial",
@@ -23,17 +22,15 @@ ASSET_META = SilverAssetMetadata(
     description="Montreal bike paths H3-traced to r10 cells; one row per (path, covered cell)",
 )
 
-# data contract
 ASSET_DATA_CONTRACT = SilverAssetDataContract(
     schema={"ID_CYCL": "numeric", "h3_r10": "str"},
     uniqueness=("ID_CYCL", "h3_r10"),
     completeness=("ID_CYCL", "h3_r10"),
 )
 
-# asset
 @dg.asset(group_name="H3_indexed", metadata=asdict(ASSET_META), deps=[montreal_bike_paths], code_version=CODE_VERSION)
 def h3_montreal_bike_paths(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
-    """h3-cover the montreal_bike_paths lines (linetrace); add h3_r10, one row per covered r10 cell"""
+    """H3-cover bike paths; one row per (path, r10 cell)."""
     if cached := reuse_if_unchanged(context):
         return cached
     gdf = s3_datastore.read_gpq(context, location_of(montreal_bike_paths))
@@ -45,5 +42,4 @@ def h3_montreal_bike_paths(context: dg.AssetExecutionContext, s3_datastore: s3_d
         metadata={"s3_cache_hit": False},
     )
 
-# asset checks
 checks = standard_checks(h3_montreal_bike_paths, ASSET_DATA_CONTRACT)

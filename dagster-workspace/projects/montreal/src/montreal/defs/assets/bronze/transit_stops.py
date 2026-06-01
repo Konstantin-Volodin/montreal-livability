@@ -1,6 +1,4 @@
-"""
-Montreal transit stops: fetch from the STM GTFS feed, cache on S3, validate.
-"""
+"""Montreal transit stops from STM GTFS feed."""
 
 import io
 import urllib.request

@@ -50,8 +50,6 @@ class s3_datastore(dg.ConfigurableResource):
         )
         context.log.info(f"Lakehouse root {self._base} ({self.region_name})")
 
-    # --- directories & manifests ---------------------------------------------
-
     def asset_dir(self, context, shard: Optional[str] = None) -> str:
         """Directory holding an asset's snapshots: ``{layer}/{asset}[/{shard}]``."""
         base = location_of(context.assets_def)
@@ -101,8 +99,6 @@ class s3_datastore(dg.ConfigurableResource):
         # _CHECKS is a sibling meta dir (per-asset check results), not a data shard.
         return [f"{prefix}/{p.name}" for p in children if p.is_dir() and p.name != _CHECKS]
 
-    # --- metadata ------------------------------------------------------------
-
     def _snapshot_metadata(self, path: UPath, file_size: int, gdf) -> dict:
         """Rich materialization metadata for a freshly written snapshot."""
         return {
@@ -112,8 +108,6 @@ class s3_datastore(dg.ConfigurableResource):
             "schema": dg.MetadataValue.json({col: str(gdf[col].dtype) for col in gdf.columns}),
             "preview": dg.MetadataValue.md(frames.preview(gdf)),
         }
-
-    # --- writes & reads ------------------------------------------------------
 
     def write_gpq(self, context, gdf: gpd.GeoDataFrame) -> Optional[str]:
         """Write a GeoDataFrame to S3 as a timestamped Parquet snapshot; return its stamp."""

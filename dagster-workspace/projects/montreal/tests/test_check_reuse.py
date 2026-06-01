@@ -57,23 +57,23 @@ def _run(instance) -> dict[str, dg.AssetCheckEvaluation]:
     return {ev.check_name: ev for ev in result.get_asset_check_evaluations()}
 
 
-def _meta(ev: dg.AssetCheckEvaluation) -> dict:
+def _meta(ev) -> dict:
     return {k: getattr(v, "value", v) for k, v in (ev.metadata or {}).items()}
 
 
 def test_reused_failing_check_keeps_its_diagnostic_metadata(tmp_path):
     _CACHE_HIT["value"] = False
     with DagsterInstance.local_temp(str(tmp_path)) as instance:
-        first = _run(instance)  # computes -> row_uniqueness FAILS with detail
+        first = _run(instance)
         assert first["row_uniqueness"].passed is False
         assert _meta(first["row_uniqueness"])["duplicate_rows"] == 1
 
-        _CACHE_HIT["value"] = True  # asset now re-emits a cached snapshot
+        _CACHE_HIT["value"] = True
         reused = _run(instance)
 
         ev = reused["row_uniqueness"]
-        assert ev.passed is False  # the reused verdict still fails
+        assert ev.passed is False
         meta = _meta(ev)
-        assert meta["reused_snapshot"] is True  # flagged as reused
-        assert meta["duplicate_rows"] == 1  # ...but the original detail survives
+        assert meta["reused_snapshot"] is True
+        assert meta["duplicate_rows"] == 1
         assert meta["subset"] == ["h3_r10"]

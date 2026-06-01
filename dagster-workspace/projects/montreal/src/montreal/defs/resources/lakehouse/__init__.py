@@ -10,7 +10,6 @@ __all__ = ["s3_datastore", "location_of", "format_size"]
 
 @dg.definitions
 def resources() -> dg.Definitions:
-    """Bind the s3_datastore resource into the autoloaded defs folder."""
     return dg.Definitions(
         resources={
             "s3_datastore": s3_datastore(

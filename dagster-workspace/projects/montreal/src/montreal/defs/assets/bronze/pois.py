@@ -1,6 +1,4 @@
-"""
-Montreal points of interest: query OpenStreetMap via Overpass, cache on S3, validate.
-"""
+"""Montreal POIs from OpenStreetMap (via Overpass)."""
 
 import json
 import urllib.parse
@@ -39,14 +37,12 @@ ASSET_DATA_CONTRACT = BronzeAssetDataContract(
 
 _MONTREAL_BBOX = (-74.05, 45.35, -73.40, 45.75)
 
-# livability category -> {OSM tag key -> accepted values}. 
 OSM_POI_TAGS = {
     "grocery": {"shop": {"supermarket", "convenience", "greengrocer", "bakery", "butcher"}},
     "school": {"amenity": {"school", "college", "university", "kindergarten"}},
     "health": {"amenity": {"clinic", "hospital", "pharmacy", "doctors", "dentist"}},
 }
 
-# update OSM tag into the form Overpass query can use
 _TAGS_BY_KEY: dict[str, set[str]] = {}
 for _groups in OSM_POI_TAGS.values():
     for _key, _vals in _groups.items():
@@ -98,7 +94,7 @@ def _post_overpass(context: dg.AssetExecutionContext, query: str) -> list[dict]:
 
 
 def _elements_to_points(elements: list[dict]) -> gpd.GeoDataFrame:
-    """WGS84 point frame from Overpass elements, dropping unclassifiable, locationless, or duplicate rows."""
+    """WGS84 point frame, deduped and filtered."""
     rows, seen = [], set()
     for element in elements:
         tags = element.get("tags") or {}
@@ -122,7 +118,6 @@ def _elements_to_points(elements: list[dict]) -> gpd.GeoDataFrame:
             }
         )
 
-    # overpass can return nothing, or every element can be filtered out.
     columns = ["osm_type", "osm_id", "name", "fclass", "geometry"]
     return gpd.GeoDataFrame(rows, columns=columns, geometry="geometry", crs=4326)
 

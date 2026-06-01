@@ -46,7 +46,6 @@ def test_case_a_partition_provenance_records_unpartitioned_upstream():
     up_key = dg.AssetKey("_pa_upstream")
     down_key = dg.AssetKey("_pa_part_downstream")
 
-    # Per-partition own record carries its own data version.
     rec_a = instance.get_latest_data_version_record(down_key, partition_key="a")
     rec_b = instance.get_latest_data_version_record(down_key, partition_key="b")
     print("CASE A own version a:", extract_data_version_from_entry(rec_a.event_log_entry))
@@ -56,10 +55,8 @@ def test_case_a_partition_provenance_records_unpartitioned_upstream():
     print("CASE A partition a provenance input_data_versions:", prov_a.input_data_versions)
     print("CASE A partition a code_version:", prov_a.code_version)
 
-    # The unpartitioned upstream should appear with its (single) live version.
     assert up_key in prov_a.input_data_versions, set(prov_a.input_data_versions)
     assert prov_a.input_data_versions[up_key] == dg.DataVersion("UP_V1")
-    # And per-partition own data versions are distinct & retrievable.
     assert extract_data_version_from_entry(rec_a.event_log_entry) == dg.DataVersion("DOWN_a")
     assert extract_data_version_from_entry(rec_b.event_log_entry) == dg.DataVersion("DOWN_b")
 
@@ -94,13 +91,11 @@ def test_case_b_what_is_recorded_for_partitioned_upstream():
     print("CASE B downstream provenance input_data_versions:", prov.input_data_versions)
     print("CASE B keys present:", set(prov.input_data_versions))
 
-    # What does a bare get_latest_data_version_record return for a partitioned key?
     bare = instance.get_latest_data_version_record(up_key)
     print("CASE B bare latest record partition:", None if bare is None else bare.partition_key)
     print("CASE B bare latest version:",
           None if bare is None else extract_data_version_from_entry(bare.event_log_entry))
 
-    # Per-partition versions of the upstream.
     for pk in ("a", "b", "c"):
         r = instance.get_latest_data_version_record(up_key, partition_key=pk)
         print(f"CASE B upstream[{pk}] version:",
@@ -109,7 +104,6 @@ def test_case_b_what_is_recorded_for_partitioned_upstream():
     recorded = prov.input_data_versions.get(up_key)
     print("CASE B recorded input version for partitioned upstream:", recorded)
 
-    # Re-materialize downstream WITHOUT touching upstream: is recorded version stable?
     assert dg.materialize(
         [_pb_part_upstream, _pb_downstream], instance=instance, selection=[_pb_downstream],
     ).success
@@ -117,11 +111,6 @@ def test_case_b_what_is_recorded_for_partitioned_upstream():
     prov2 = extract_data_provenance_from_entry(down_rec2.event_log_entry)
     recorded2 = prov2.input_data_versions.get(up_key)
     print("CASE B recorded input version after unchanged re-run:", recorded2)
-    assert recorded == recorded2, "partitioned-upstream input version not stable across unchanged runs"
+    assert recorded == recorded2
 
-    # The recorded value is a sha256 aggregate over the partition versions, NOT any
-    # single partition's version -- so a bare latest-record read cannot reconstruct
-    # it. (Confirmed above: bare read returns partition 'c' = UP_c, != the hash.)
-    # That is exactly why the gate cannot key off a partitioned upstream and
-    # livability_score is left always-recompute.
     assert recorded != extract_data_version_from_entry(bare.event_log_entry)

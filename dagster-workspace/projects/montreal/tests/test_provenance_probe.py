@@ -37,23 +37,17 @@ def test_deps_edge_is_recorded_in_downstream_provenance():
     up_key = dg.AssetKey("_probe_upstream")
     down_key = dg.AssetKey("_probe_downstream")
 
-    # The current data version of the upstream (what the gate would read live).
     up_rec = instance.get_latest_data_version_record(up_key)
     current_up_version = extract_data_version_from_entry(up_rec.event_log_entry)
     assert current_up_version == dg.DataVersion("UP_V1")
 
-    # The downstream's provenance: did Dagster capture the deps-edge input version?
     down_rec = instance.get_latest_data_version_record(down_key)
     prov = extract_data_provenance_from_entry(down_rec.event_log_entry)
-    assert prov is not None, "downstream has no DataProvenance at all"
+    assert prov is not None
 
-    # The crux: the upstream key, reached only via deps=[...], must appear with
-    # the version the downstream consumed.
     assert up_key in prov.input_data_versions, (
         f"deps-edge upstream missing from provenance; "
         f"keys present: {set(prov.input_data_versions)}"
     )
     assert prov.input_data_versions[up_key] == dg.DataVersion("UP_V1")
-
-    # And code_version is tracked too (the other half of the gate's key).
     assert prov.code_version == "d1"

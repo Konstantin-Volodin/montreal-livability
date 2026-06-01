@@ -1,8 +1,4 @@
-"""
-Montreal address points: fetch from donnees.montreal.ca, cache on S3, validate.
-
-Addresses move only a few times a year, so the freshness window is generous.
-"""
+"""Montreal address points from donnees.montreal.ca."""
 
 import geopandas as gpd
 

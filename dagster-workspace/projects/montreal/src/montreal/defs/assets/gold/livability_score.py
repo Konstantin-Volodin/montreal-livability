@@ -11,11 +11,8 @@ from shapely.geometry import Point
 
 from montreal import __version__ as CODE_VERSION
 from montreal.defs.assets.gold._config import (
-    DEFAULT_WEIGHTS,
-    SCORE_COLUMNS,
-    UNKNOWN_MUNICIPALITY,
-    GoldAssetDataContract,
-    GoldAssetMetadata,
+    DEFAULT_WEIGHTS, SCORE_COLUMNS, UNKNOWN_MUNICIPALITY,
+    GoldAssetDataContract, GoldAssetMetadata,
 )
 from montreal.defs.assets.silver._config import POI_CATEGORIES
 from montreal.defs.assets.silver.municipalities import montreal_municipalities
@@ -110,27 +107,27 @@ def livability_score(
     out["municipality"] = _tag_municipalities(out["h3_r10"], boundaries).to_numpy()
 
     for category in POI_CATEGORIES:
-        column = f"score_{category}"
-        resolved = int(np.count_nonzero(out[column].to_numpy() > 0))
+        col = f"score_{category}"
+        resolved = int(np.count_nonzero(out[col].to_numpy() > 0))
         context.log.info(
-            f"  category '{category}': {resolved}/{len(out)} cells scored "
-            f"(mean {out[column].mean():.1f})"
-            if resolved else f"  category '{category}': 0 cells scored"
+            f"  {category}: {resolved}/{len(out)} cells (mean {out[col].mean():.1f})"
+            if resolved else f"  {category}: 0 cells"
         )
 
-    weights = {category: getattr(config, category) for category in POI_CATEGORIES}
+    weights = {c: getattr(config, c) for c in POI_CATEGORIES}
     total = sum(weights.values())
     if total <= 0:
-        raise ValueError(f"Livability weights must sum to > 0, got {weights}")
+        raise ValueError(f"weights must sum > 0, got {weights}")
 
-    score_weights = pd.Series({f"score_{c}": w for c, w in weights.items()})
-    out["livability"] = out[SCORE_COLUMNS].mul(score_weights).sum(axis=1) / total
+    out["livability"] = (
+        out[SCORE_COLUMNS].mul(pd.Series({f"score_{c}": w for c, w in weights.items()}))
+        .sum(axis=1) / total
+    )
 
+    mean_liv = np.nanmean(out['livability'])
     context.log.info(
-        f"livability_score: {len(out)} r10 cells from {len(per_address)} addresses, "
-        f"{out['municipality'].nunique()} municipalities, "
-        f"mean livability {np.nanmean(out['livability']):.1f} "
-        f"(weights {weights}, sum {total:.2f})"
+        f"livability_score: {len(out)} r10 cells, {out['municipality'].nunique()} "
+        f"municipalities, mean {mean_liv:.1f} (sum {total:.2f})"
     )
 
     stamp = s3_datastore.write_gpq(context, out)

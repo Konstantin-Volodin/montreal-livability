@@ -5,7 +5,6 @@ from typing import Dict, Sequence, Tuple
 
 from montreal.defs.assets.silver._config import POI_CATEGORIES
 
-# Constants shared by the gold assets (livability_score + livability_map).
 UNKNOWN_MUNICIPALITY = "Inconnu"
 SCORE_COLUMNS = [f"score_{c}" for c in POI_CATEGORIES]
 
@@ -31,9 +30,9 @@ class GoldAssetMetadata:
 
 @dataclass(frozen=True)
 class GoldAssetDataContract:
-    """Gold adds value bounds on top of the silver shape checks (scores are 0-100)."""
+    """Scores are 0-100 with value bounds on top of silver shape checks."""
 
-    schema: Dict[str, str]                       # column -> kind ("numeric"|"str"|"geometry")
-    uniqueness: Sequence[str]                    # columns a row must be unique over
-    completeness: Sequence[str]                  # columns that must be non-null
-    bounds: Dict[str, Tuple[float, float]]       # column -> inclusive (low, high) range
+    schema: Dict[str, str]
+    uniqueness: Sequence[str]
+    completeness: Sequence[str]
+    bounds: Dict[str, Tuple[float, float]]

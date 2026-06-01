@@ -12,31 +12,19 @@ from montreal.defs.assets.gold._config import DEFAULT_WEIGHTS
 from montreal.defs.assets.silver._config import POI_CATEGORIES
 
 POI_LABELS = {
-    "grocery": "Grocery stores",
-    "school": "Schools",
-    "health": "Health",
-    "park": "Parks",
-    "transit": "Transit",
-    "bike": "Bike paths",
+    "grocery": "Grocery stores", "school": "Schools", "health": "Health",
+    "park": "Parks", "transit": "Transit", "bike": "Bike paths",
 }
 TABLE_LABELS = {
-    "grocery": "Gro.",
-    "school": "Sch.",
-    "health": "Health",
-    "transit": "Transit",
-    "park": "Park",
-    "bike": "Bike",
+    "grocery": "Gro.", "school": "Sch.", "health": "Health",
+    "transit": "Transit", "park": "Park", "bike": "Bike",
 }
-# Same blend weights the scoring asset uses, keyed by score column.
 SCORE_WEIGHTS = {f"score_{c}": w for c, w in DEFAULT_WEIGHTS.items()}
 TEMPLATES = Path(__file__).parent / "templates"
 ENV = Environment(
-    loader=FileSystemLoader(TEMPLATES),
-    autoescape=select_autoescape(["html"]),
-    trim_blocks=True,
-    lstrip_blocks=True,
+    loader=FileSystemLoader(TEMPLATES), autoescape=select_autoescape(["html"]),
+    trim_blocks=True, lstrip_blocks=True,
 )
-# Inlined into report.html so the deployed S3 artifact stays a single self-contained file.
 REPORT_CSS = (TEMPLATES / "report.css").read_text(encoding="utf-8")
 COLORMAP = cm.LinearColormap(
     ["#d7191c", "#fdae61", "#ffffbf", "#a6d96a", "#1a9641"],
@@ -57,30 +45,26 @@ def _round_coords(coords):
 
 
 def _feature(row, properties: dict) -> dict:
-    geometry = row.geometry.__geo_interface__
+    geo = row.geometry.__geo_interface__
     return {
         "type": "Feature",
-        "geometry": {
-            "type": geometry["type"],
-            "coordinates": _round_coords(geometry["coordinates"]),
-        },
+        "geometry": {"type": geo["type"], "coordinates": _round_coords(geo["coordinates"])},
         "properties": properties,
     }
 
 
 def _hex_feature_collection(hexes: pd.DataFrame) -> dict:
-    features = []
-    for row in hexes.itertuples(index=False):
-        properties = {
-            "municipality": str(row.municipality),
-            "addresses": int(row.addresses),
-            "livability": round(float(row.livability), 1),
-        }
-        for category in POI_CATEGORIES:
-            properties[f"score_{category}"] = round(
-                float(getattr(row, f"score_{category}")), 1
-            )
-        features.append(_feature(row, properties))
+    features = [
+        _feature(
+            row,
+            {
+                "municipality": str(row.municipality), "addresses": int(row.addresses),
+                "livability": round(float(row.livability), 1),
+                **{f"score_{c}": round(float(getattr(row, f"score_{c}")), 1) for c in POI_CATEGORIES},
+            },
+        )
+        for row in hexes.itertuples(index=False)
+    ]
     return {"type": "FeatureCollection", "features": features}
 
 
@@ -95,37 +79,25 @@ def _boundary_feature_collection(boundaries: pd.DataFrame) -> dict:
 
 
 def build_map_html(hexes: pd.DataFrame, boundaries: pd.DataFrame) -> str:
-    centroids = hexes["geometry"].map(lambda poly: poly.centroid)
+    cents = hexes["geometry"].map(lambda p: p.centroid)
     fmap = folium.Map(
-        location=[
-            centroids.map(lambda p: p.y).mean(),
-            centroids.map(lambda p: p.x).mean(),
-        ],
-        zoom_start=11,
-        tiles="cartodbpositron",
+        location=[cents.map(lambda p: p.y).mean(), cents.map(lambda p: p.x).mean()],
+        zoom_start=11, tiles="cartodbpositron",
     )
     COLORMAP.add_to(fmap)
 
-    metrics = [("livability", "Overall livability")]
-    metrics += [(f"score_{c}", c.capitalize()) for c in POI_CATEGORIES]
+    metrics = [("livability", "Overall livability")] + [(f"score_{c}", c.capitalize()) for c in POI_CATEGORIES]
     hex_layer = folium.GeoJson(
-        _hex_feature_collection(hexes),
-        name="Livability cells",
-        style_function=lambda feature: {
-            "fillColor": COLORMAP(feature["properties"]["livability"]),
-            "color": COLORMAP(feature["properties"]["livability"]),
-            "weight": 0,
-            "fillOpacity": 0.6,
+        _hex_feature_collection(hexes), name="Livability cells",
+        style_function=lambda f: {
+            "fillColor": COLORMAP(f["properties"]["livability"]),
+            "color": COLORMAP(f["properties"]["livability"]),
+            "weight": 0, "fillOpacity": 0.6,
         },
         tooltip=folium.GeoJsonTooltip(
-            fields=["municipality", "addresses", *[key for key, _label in metrics]],
-            aliases=[
-                "Municipality",
-                "Addresses",
-                *[label for _key, label in metrics],
-            ],
-            localize=True,
-            sticky=False,
+            fields=["municipality", "addresses", *[k for k, _ in metrics]],
+            aliases=["Municipality", "Addresses", *[l for _, l in metrics]],
+            localize=True, sticky=False,
         ),
     )
     hex_layer.add_to(fmap)
@@ -134,32 +106,16 @@ def build_map_html(hexes: pd.DataFrame, boundaries: pd.DataFrame) -> str:
     bounds = folium.FeatureGroup(name="Municipality boundaries", show=True)
     folium.GeoJson(
         boundary_collection,
-        style_function=lambda _f: {
-            "fill": False,
-            "color": "#39495c",
-            "weight": 0.8,
-            "opacity": 0.48,
-        },
-        tooltip=folium.GeoJsonTooltip(
-            fields=["municipality"],
-            aliases=["Municipality"],
-        ),
+        style_function=lambda _: {"fill": False, "color": "#39495c", "weight": 0.8, "opacity": 0.48},
+        tooltip=folium.GeoJsonTooltip(fields=["municipality"], aliases=["Municipality"]),
     ).add_to(bounds)
     bounds.add_to(fmap)
 
-    map_name = fmap.get_name()
-    hex_layer_name = hex_layer.get_name()
-    boundary_group_name = bounds.get_name()
     map_html = fmap.get_root().render()
-    boundary_features = {
-        _key(feature["properties"]["municipality"]): feature
-        for feature in boundary_collection["features"]
-    }
     map_script = ENV.get_template("map.html").render(
-        map_name=map_name,
-        hex_layer_name=hex_layer_name,
-        boundary_group_name=boundary_group_name,
-        boundary_features=boundary_features,
+        map_name=fmap.get_name(), hex_layer_name=hex_layer.get_name(),
+        boundary_group_name=bounds.get_name(),
+        boundary_features={_key(f["properties"]["municipality"]): f for f in boundary_collection["features"]},
         metric_weights=SCORE_WEIGHTS,
     )
     return map_html.replace(
@@ -176,30 +132,25 @@ def render_report(*, stats: dict, table: pd.DataFrame, map_html: str) -> str:
         ("Municipalities", str(stats["municipalities"])),
         ("Mean livability", f"{stats['mean_livability']:.1f}"),
     ]
-    category_total = max(sum(stats["by_category"].get(c, 0) for c in POI_CATEGORIES), 1)
+    cat_total = max(sum(stats["by_category"].get(c, 0) for c in POI_CATEGORIES), 1)
     category_stats = sorted(
         [
             {
                 "label": POI_LABELS.get(c, c.capitalize()),
                 "value": f"{stats['by_category'].get(c, 0):,}",
                 "count": stats["by_category"].get(c, 0),
-                "share": round(stats["by_category"].get(c, 0) / category_total * 100, 1),
+                "share": round(100 * stats["by_category"].get(c, 0) / cat_total, 1),
             }
             for c in POI_CATEGORIES
         ],
-        key=lambda item: item["count"],
-        reverse=True,
+        key=lambda x: x["count"], reverse=True,
     )
 
-    columns = ["#", "Municipality", "Addresses", "Livability"]
-    columns += [TABLE_LABELS.get(c, c.capitalize()) for c in POI_CATEGORIES]
+    columns = ["#", "Municipality", "Addresses", "Livability"] + [TABLE_LABELS.get(c, c.capitalize()) for c in POI_CATEGORIES]
     rows = [
         {
-            "rank": rank,
-            "municipality": str(r.municipality),
-            "municipality_key": _key(r.municipality),
-            "addresses": f"{int(r.addresses):,}",
-            "livability": f"{r.livability:.1f}",
+            "rank": rank, "municipality": str(r.municipality), "municipality_key": _key(r.municipality),
+            "addresses": f"{int(r.addresses):,}", "livability": f"{r.livability:.1f}",
             "livability_bg": COLORMAP(r.livability),
             "scores": [f"{getattr(r, f'score_{c}'):.0f}" for c in POI_CATEGORIES],
         }
@@ -207,19 +158,8 @@ def render_report(*, stats: dict, table: pd.DataFrame, map_html: str) -> str:
     ]
 
     return ENV.get_template("report.html").render(
-        styles=REPORT_CSS,
-        summary_stats=summary_stats,
-        category_stats=category_stats,
-        columns=columns,
-        rows=rows,
-        municipality_count=len(rows),
-        updated_on=stats.get("updated_on", ""),
-        map_metrics=[
-            {
-                "key": f"score_{category}",
-                "label": POI_LABELS.get(category, category.capitalize()),
-            }
-            for category in POI_CATEGORIES
-        ],
+        styles=REPORT_CSS, summary_stats=summary_stats, category_stats=category_stats,
+        columns=columns, rows=rows, municipality_count=len(rows), updated_on=stats.get("updated_on", ""),
+        map_metrics=[{"key": f"score_{c}", "label": POI_LABELS.get(c, c.capitalize())} for c in POI_CATEGORIES],
         map_html=map_html,
     )

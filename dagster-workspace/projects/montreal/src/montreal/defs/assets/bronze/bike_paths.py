@@ -1,6 +1,4 @@
-"""
-Montreal bike paths (réseau cyclable): fetch from donnees.montreal.ca, cache on S3, validate.
-"""
+"""Montreal bike paths (réseau cyclable) from donnees.montreal.ca."""
 
 import geopandas as gpd
 

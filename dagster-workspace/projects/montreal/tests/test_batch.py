@@ -28,7 +28,6 @@ def test_summarize_handles_all_passing():
     assert "1 ok | 0 warn | 0 fail" in summary
 
 
-# --- per-partition gathering from the event log ---------------------------
 
 _PARTS = dg.StaticPartitionsDefinition(["a", "b"])
 _FAILING = {"a"}  # which partition's check currently fails

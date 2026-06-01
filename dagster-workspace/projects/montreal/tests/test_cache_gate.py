@@ -15,8 +15,6 @@ from dagster import DagsterInstance
 
 from montreal.defs.assets._cache import reuse_if_unchanged
 
-# Module-level side channels: the controllable upstream version and a record of
-# every time the downstream actually ran its compute body.
 _UPSTREAM_VERSION = {"value": "UP_V1"}
 _COMPUTE_CALLS: list[str] = []
 
@@ -44,7 +42,6 @@ def _materialize(instance):
 
 
 def _down_cache_hit(result) -> bool:
-    """Read the s3_cache_hit flag off the gate_downstream materialization."""
     for event in result.get_asset_materialization_events():
         mat = event.event_specific_data.materialization
         if mat.asset_key == dg.AssetKey("gate_downstream"):

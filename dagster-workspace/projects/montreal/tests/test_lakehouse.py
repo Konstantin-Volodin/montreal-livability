@@ -17,7 +17,6 @@ from montreal.defs.resources.lakehouse.frames import preview, read_parquet_bytes
 from montreal.defs.resources.lakehouse.paths import now_stamp
 
 
-# --- pure helpers ---------------------------------------------------------
 
 
 def test_location_of_is_layer_over_asset_name():
@@ -34,15 +33,12 @@ def test_now_stamp_is_a_sortable_fixed_width_utc_string():
 
 
 def test_to_wgs84_normalizes_crs_and_passes_non_geo_through():
-    # missing crs is assumed to be 4326.
     no_crs = gpd.GeoDataFrame(geometry=[Point(-73.6, 45.5)])
     assert to_wgs84(no_crs).crs.to_epsg() == 4326
 
-    # a projected frame is reprojected.
     projected = gpd.GeoDataFrame(geometry=[Point(-8_190_000, 5_690_000)], crs=3857)
     assert to_wgs84(projected).crs.to_epsg() == 4326
 
-    # a plain DataFrame is returned untouched.
     plain = pd.DataFrame({"a": [1]})
     assert to_wgs84(plain) is plain
 
@@ -64,5 +60,3 @@ def test_preview_drops_geometry():
     geo = gpd.GeoDataFrame({"name": ["x"]}, geometry=[Point(0, 0)], crs=4326)
     md = preview(geo)
     assert "name" in md and "geometry" not in md
-
-

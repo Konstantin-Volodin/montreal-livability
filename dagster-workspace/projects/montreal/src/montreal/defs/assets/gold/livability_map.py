@@ -1,13 +1,7 @@
-"""Gold: HTML livability report (summary pills, municipality ranking, map).
-
-Terminal HTML artifact: metadata only, no data contract or checks (the check
-factories read geoparquet). Unlike the upstream assets it has no change-detection
-skip - it re-renders every run so the report always carries a fresh "updated on"
-timestamp.
-"""
+"""Gold: HTML livability report with summary, municipality ranking, embedded map."""
 
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import dagster as dg
@@ -16,11 +10,7 @@ import pandas as pd
 from shapely.geometry import Polygon
 
 from montreal.defs.assets.gold import report
-from montreal.defs.assets.gold._config import (
-    SCORE_COLUMNS,
-    UNKNOWN_MUNICIPALITY,
-    GoldAssetMetadata,
-)
+from montreal.defs.assets.gold._config import SCORE_COLUMNS, UNKNOWN_MUNICIPALITY, GoldAssetMetadata
 from montreal.defs.assets.gold.livability_score import livability_score
 from montreal.defs.assets.silver.amenities import amenities
 from montreal.defs.assets.silver.municipalities import montreal_municipalities
@@ -44,13 +34,13 @@ def _dominant_municipality(s: pd.Series) -> str:
 
 def _agg_hexes(scores: pd.DataFrame, resolution: int) -> pd.DataFrame:
     df = scores.dropna(subset=["h3_r10"]).copy()
-    df["h3_agg"] = df["h3_r10"].map(lambda cell: h3.cell_to_parent(cell, resolution))
+    df["h3_agg"] = df["h3_r10"].map(lambda c: h3.cell_to_parent(c, resolution))
     agg = _address_weighted(df, "h3_agg")
     agg["municipality"] = agg["h3_agg"].map(
         df.groupby("h3_agg")["municipality"].agg(_dominant_municipality)
     )
     agg["geometry"] = agg["h3_agg"].map(
-        lambda cell: Polygon([(lng, lat) for lat, lng in h3.cell_to_boundary(cell)])
+        lambda c: Polygon([(lng, lat) for lat, lng in h3.cell_to_boundary(c)])
     )
     return agg
 
@@ -66,9 +56,7 @@ def _municipality_table(scores: pd.DataFrame) -> pd.DataFrame:
 
 
 ASSET_META = GoldAssetMetadata(
-    layer="gold",
-    data_category="report",
-    segmentation="snapshot",
+    layer="gold", data_category="report", segmentation="snapshot",
     description="HTML livability report: summary pills, municipality ranking, embedded map",
 )
 
@@ -78,38 +66,32 @@ ASSET_META = GoldAssetMetadata(
     metadata=asdict(ASSET_META),
     deps=[livability_score, amenities, montreal_municipalities],
 )
-def livability_map(
-    context: dg.AssetExecutionContext,
-    s3_datastore: s3_datastore,
-) -> dg.MaterializeResult:
-    """HTML livability report: summary pills, municipality ranking, embedded map (gold)."""
+def livability_map(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
+    """HTML livability report with summary pills, municipality ranking, embedded map."""
     scores = s3_datastore.read_gpq(context, location_of(livability_score))
-    amenities_gdf = s3_datastore.read_gpq(context, location_of(amenities))
-    boundaries = s3_datastore.read_gpq(context, location_of(montreal_municipalities))
-
     hexes = _agg_hexes(scores, 9)
     table = _municipality_table(scores)
 
+    amenities_gdf = s3_datastore.read_gpq(context, location_of(amenities))
+    mean_liv = float(scores["livability"].mean())
     stats = {
         "addresses": int(scores["n_addresses"].sum()),
         "amenities": int(len(amenities_gdf)),
         "by_category": amenities_gdf["category"].value_counts().to_dict(),
-        "mean_livability": float(scores["livability"].mean()),
+        "mean_livability": mean_liv,
         "municipalities": int(table["municipality"].nunique()),
         "updated_on": datetime.now(ZoneInfo("America/Toronto")).strftime("%Y-%m-%d"),
     }
 
     context.log.info(
         f"livability_map: {len(hexes)} r9 cells, {stats['municipalities']} municipalities, "
-        f"{stats['addresses']} addresses, {stats['amenities']} amenities, "
-        f"mean livability {stats['mean_livability']:.1f}"
+        f"{stats['addresses']} addresses, {stats['amenities']} amenities, mean {mean_liv:.1f}"
     )
 
+    boundaries = s3_datastore.read_gpq(context, location_of(montreal_municipalities))
     stamp = s3_datastore.write_html(
-        context,
-        report.render_report(
-            stats=stats,
-            table=table,
+        context, report.render_report(
+            stats=stats, table=table,
             map_html=report.build_map_html(hexes, boundaries),
         ),
     )
@@ -119,7 +101,7 @@ def livability_map(
             "num_addresses": dg.MetadataValue.int(stats["addresses"]),
             "num_amenities": dg.MetadataValue.int(stats["amenities"]),
             "num_municipalities": dg.MetadataValue.int(stats["municipalities"]),
-            "mean_livability": dg.MetadataValue.float(round(stats["mean_livability"], 2)),
+            "mean_livability": dg.MetadataValue.float(round(mean_liv, 2)),
             "updated_on": dg.MetadataValue.text(stats["updated_on"]),
         }
     )

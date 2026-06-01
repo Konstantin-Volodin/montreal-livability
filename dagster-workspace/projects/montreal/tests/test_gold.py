@@ -44,16 +44,13 @@ def _scored(municipality: list[str], n_addresses: list[int], livability: list[fl
     return pd.DataFrame(frame)
 
 
-# --- score curve ----------------------------------------------------------
 
 
 def test_distance_score_is_piecewise_with_zero_past_the_last_knot():
     got = _distance_score(np.array([0, 100, 500, 750, 1000, 1500, np.nan]))
-    # knots: 100m->100, 500m->50, 1000m->20; closer clamps to 100, past 1km -> 0.
     np.testing.assert_allclose(got, [100, 100, 50, 35, 20, 0, 0])
 
 
-# --- municipality tagging -------------------------------------------------
 
 
 def test_tag_municipalities_labels_inside_cells_and_marks_outsiders_unknown():
@@ -71,7 +68,6 @@ def test_tag_municipalities_labels_inside_cells_and_marks_outsiders_unknown():
     assert tagged.iloc[1] == UNKNOWN_MUNICIPALITY
 
 
-# --- report aggregations --------------------------------------------------
 
 
 def test_dominant_municipality_picks_the_mode_or_falls_back():
@@ -101,12 +97,11 @@ def test_agg_hexes_rolls_r10_children_up_to_one_parent_polygon():
 
     agg = _agg_hexes(scores, 9)
 
-    assert len(agg) == 1  # both children share the one r9 parent
+    assert len(agg) == 1
     assert agg.iloc[0]["municipality"] == "A"
     assert isinstance(agg.iloc[0]["geometry"], Polygon)
 
 
-# --- shared constants -----------------------------------------------------
 
 
 def test_default_weights_cover_every_category_and_sum_to_one():
@@ -115,14 +110,10 @@ def test_default_weights_cover_every_category_and_sum_to_one():
     assert SCORE_COLUMNS == [f"score_{c}" for c in POI_CATEGORIES]
 
 
-# --- value_range check (the gold-only addition) ---------------------------
-
 _FRAME: pd.DataFrame | None = None
 
 
 class FakeStore(s3_datastore):
-    """Reads return the test-provided frame; no boto."""
-
     def setup_for_execution(self, context) -> None:
         pass
 
@@ -166,19 +157,13 @@ def test_standard_checks_adds_value_range_when_contract_has_bounds():
 
 def test_value_range_passes_in_bounds_and_fails_out_of_bounds():
     in_bounds = _run_gold_checks(pd.DataFrame({"h3_r10": ["a", "b"], "livability": [10.0, 90.0]}))
-    assert in_bounds == {
-        "schema_contract": True,
-        "row_uniqueness": True,
-        "field_completeness": True,
-        "value_range": True,
-    }
+    assert all(in_bounds.values())
 
     out_of_bounds = _run_gold_checks(pd.DataFrame({"h3_r10": ["a", "b"], "livability": [10.0, 150.0]}))
-    assert out_of_bounds["value_range"] is False  # 150 > 100
-    assert out_of_bounds["schema_contract"] is True  # shape is still fine
+    assert out_of_bounds["value_range"] is False
+    assert out_of_bounds["schema_contract"] is True
 
 
-# --- per-module contract sanity -------------------------------------------
 
 
 def test_livability_score_contract_carries_bounds_and_four_checks():
@@ -197,11 +182,9 @@ def test_livability_map_is_a_terminal_artifact_without_contract_or_checks():
     assert not hasattr(livability_map, "checks")
 
 
-# --- report HTML rendering ------------------------------------------------
 
 
 def _report_table() -> pd.DataFrame:
-    """An already-aggregated municipality table, the shape render_report consumes."""
     scores = {f"score_{c}": float(i * 10) for i, c in enumerate(POI_CATEGORIES, 1)}
     return pd.DataFrame([
         {"municipality": "Le Plateau-Mont-Royal", "addresses": 42000, "livability": 88.0, **scores},
@@ -226,41 +209,37 @@ def _render() -> str:
 
 def test_render_report_inlines_the_stylesheet_unescaped():
     html = _render()
-    # The standalone S3 artifact carries its CSS inline; the |safe filter keeps it intact.
     assert "<style>" in html and "box-sizing:border-box" in html
-    assert 'content:""' in html  # not HTML-escaped to content:&#34;&#34;
+    assert 'content:""' in html
 
 
 def test_render_report_carries_bilingual_labels_and_hex_motif():
     html = _render()
     for label in ("Données ouvertes", "Commodités", "Carte", "Classement"):
         assert label in html
-    assert "clip-path:polygon" in html  # hex section bullets
-    assert "image/svg+xml" in html  # hero hex-grid field
+    assert "clip-path:polygon" in html
+    assert "image/svg+xml" in html
 
 
 def test_render_report_emits_one_ranking_row_per_municipality():
     html = _render()
     assert html.count('data-municipality-key="') == len(_report_table())
     assert "Le Plateau-Mont-Royal" in html and "Verdun" in html
-    assert "MAPMARKER" in html  # map html embedded into the iframe srcdoc
+    assert "MAPMARKER" in html
 
 
 def test_render_report_stacks_the_ranking_table_below_the_map():
     html = _render()
-    # Map and ranking table are both always shown; the map sits above the table.
     assert 'class="map-frame"' in html and 'class="table-frame"' in html
     assert html.index('class="map-frame"') < html.index('class="table-frame"')
-    assert "scrollIntoView" in html  # clicking a row still flies the map to it
+    assert "scrollIntoView" in html
 
 
 def test_preview_builds_a_full_report_with_a_real_map():
-    """End-to-end render through build_map_html (folium), and refresh the openable
-    preview_report.html as a side benefit of running the suite."""
     from tests import preview
 
     out = preview.write_preview()
     html = out.read_text(encoding="utf-8")
-    assert "leaflet" in html.lower()  # a real interactive map, not a placeholder
-    assert html.count('data-municipality-key="') == len(preview.MUNIS)  # one ranking row per muni
-    assert "Carte" in html and "Classement" in html  # bilingual labels survive the full path
+    assert "leaflet" in html.lower()
+    assert html.count('data-municipality-key="') == len(preview.MUNIS)
+    assert "Carte" in html and "Classement" in html

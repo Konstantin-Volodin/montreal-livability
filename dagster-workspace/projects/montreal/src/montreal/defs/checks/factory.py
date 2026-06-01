@@ -64,8 +64,6 @@ def _reused_snapshot(context, asset: dg.AssetsDefinition) -> bool:
     return bool(getattr(flag, "value", flag))
 
 
-# --- individual contract assertions: pure ``df -> AssetCheckResult`` -------
-
 def _schema_contract_result(df, schema: dict[str, str]) -> dg.AssetCheckResult:
     """Each contract column exists and has the expected dtype kind."""
     present = set(df.columns)
@@ -172,9 +170,7 @@ def standard_checks(asset: dg.AssetsDefinition, contract) -> list:
 
     @dg.multi_asset_check(specs=specs, name=f"{asset.key.path[-1]}_contract_checks")
     def _checks(context: dg.AssetCheckExecutionContext, s3_datastore: s3_datastore):
-        # Asset re-emitted its cached snapshot (bronze freshness hit): the data is unchanged,
-        # so re-emit each check's prior verdict from the event log rather than re-reading S3.
-        # (A multi-check must yield every spec, so this only short-circuits when all priors exist.)
+        # Reused snapshot (cache hit): re-emit prior verdicts instead of re-reading S3.
         if _reused_snapshot(context, asset):
             els = context.instance.event_log_storage
             prior = [els.get_asset_check_execution_history(spec.key, limit=1, status=_DONE) for spec in specs]
@@ -182,8 +178,7 @@ def standard_checks(asset: dg.AssetsDefinition, contract) -> list:
                 context.log.info(f"{asset.key.to_user_string()} reused its snapshot; re-emitting {len(prior)} prior check result(s)")
                 for [rec] in prior:
                     e = rec.evaluation
-                    # Keep the original metadata (duplicate_rows, subset, ...) so a reused
-                    # FAIL still alerts with its diagnostic detail; just flag it as reused.
+                    # Keep metadata (e.g., duplicate_rows, subset) so FAIL still has diagnostic detail.
                     yield dg.AssetCheckResult(
                         check_name=e.check_name,
                         passed=e.passed,

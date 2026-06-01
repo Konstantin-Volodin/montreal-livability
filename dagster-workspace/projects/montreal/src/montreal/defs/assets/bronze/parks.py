@@ -1,6 +1,4 @@
-"""
-Montreal parks (espaces verts): fetch from donnees.montreal.ca, cache on S3, validate.
-"""
+"""Montreal parks (espaces verts) from donnees.montreal.ca."""
 
 import geopandas as gpd
 

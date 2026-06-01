@@ -1,6 +1,4 @@
-"""
-Montreal agglomeration boundaries: fetch from donnees.montreal.ca, cache on S3, validate.
-"""
+"""Montreal agglomeration boundaries from donnees.montreal.ca."""
 
 import geopandas as gpd
 

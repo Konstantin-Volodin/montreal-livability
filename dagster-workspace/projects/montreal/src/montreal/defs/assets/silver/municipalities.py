@@ -14,7 +14,6 @@ from montreal.defs.assets.silver._config import (
 from montreal.defs.checks.factory import standard_checks
 from montreal.defs.resources.lakehouse import location_of, s3_datastore
 
-# metadata
 ASSET_META = SilverAssetMetadata(
     layer="silver",
     data_category="geospatial",
@@ -22,14 +21,12 @@ ASSET_META = SilverAssetMetadata(
     description="Official Montreal boundary polygons normalized to [municipality, type, geometry] (WGS84)",
 )
 
-# data contract
 ASSET_DATA_CONTRACT = SilverAssetDataContract(
     schema={"municipality": "str", "type": "str", "geometry": "geometry"},
     uniqueness=("municipality",),
     completeness=("municipality", "type", "geometry"),
 )
 
-# asset
 @dg.asset(
     group_name="reference",
     metadata=asdict(ASSET_META),
@@ -37,16 +34,13 @@ ASSET_DATA_CONTRACT = SilverAssetDataContract(
     code_version=CODE_VERSION,
 )
 def montreal_municipalities(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
-    """Normalize the official boundary polygons to ``[municipality, type, geometry]`` (WGS84)."""
+    """Normalize boundary polygons to [municipality, type, geometry]."""
     if cached := reuse_if_unchanged(context):
         return cached
     gdf = s3_datastore.read_gpq(context, location_of(montreal_municipality_boundaries))
     for col in ("NOM", "TYPE"):
         if col not in gdf.columns:
-            raise ValueError(
-                f"Expected column {col!r} on the boundary file. "
-                f"Available columns: {list(gdf.columns)}"
-            )
+            raise ValueError(f"Expected column {col!r}. Available: {list(gdf.columns)}")
     out = gdf.rename(columns={"NOM": "municipality", "TYPE": "type"})[["municipality", "type", "geometry"]]
     context.log.info(f"montreal_municipalities: {len(out)} boundaries ({out['type'].value_counts().to_dict()})")
     stamp = s3_datastore.write_gpq(context, out)
@@ -55,5 +49,4 @@ def montreal_municipalities(context: dg.AssetExecutionContext, s3_datastore: s3_
         metadata={"s3_cache_hit": False},
     )
 
-# asset checks
 checks = standard_checks(montreal_municipalities, ASSET_DATA_CONTRACT)

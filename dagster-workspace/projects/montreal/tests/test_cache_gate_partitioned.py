@@ -20,8 +20,6 @@ from montreal.defs.assets._cache import reuse_if_unchanged
 
 PARTS = dg.StaticPartitionsDefinition(["a", "b", "c"])
 
-# Controllable unpartitioned upstream version + a log of (partition, version)
-# every time the downstream actually ran its compute body.
 _UPSTREAM_VERSION = {"value": "UP_V1"}
 _COMPUTE_CALLS: list[tuple[str, str]] = []
 

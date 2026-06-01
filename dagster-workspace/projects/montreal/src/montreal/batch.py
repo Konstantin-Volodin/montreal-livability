@@ -124,7 +124,10 @@ def materialize_partitions(partitions: list[str]) -> None:
     Concurrent runs share one stdout, so each partition's output is captured and printed
     as a contiguous block (a one-line status on success, the full log on failure). Raises
     if any partition fails, so the batch surfaces it instead of silently moving to gold."""
-    cmd = lambda p: ["dagster", "asset", "materialize", "-m", MODULE, "--select", "distances_to_amenities", "--partition", p]
+    cmd = lambda p: [
+        "dagster", "asset", "materialize", "-m", MODULE,
+        "--select", "distances_to_amenities", "--partition", p
+    ]
     failed, done = [], 0
     with ThreadPoolExecutor(max_workers=PARTITION_CONCURRENCY) as pool:
         futures = {pool.submit(subprocess.run, cmd(p), capture_output=True, text=True): p for p in partitions}

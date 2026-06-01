@@ -20,12 +20,10 @@ class BronzeAssetMetadata:
 
 @dataclass(frozen=True)
 class BronzeAssetDataContract:
-    """Every bronze asset must set all four fields (no defaults - a missing one fails at import)."""
-
-    schema: Dict[str, str]        # column -> expected kind ("numeric"|"str"|"geometry")
-    uniqueness: Sequence[str]     # columns a row must be unique over
-    completeness: Sequence[str]   # columns that must be non-null
-    freshness: Dict[str, int]     # e.g. {"max_days": 365}
+    schema: Dict[str, str]
+    uniqueness: Sequence[str]
+    completeness: Sequence[str]
+    freshness: Dict[str, int]
 
 
 Fetch = Callable[[dg.AssetExecutionContext], gpd.GeoDataFrame]
@@ -35,13 +33,7 @@ def raw_geo_asset(
     contract: BronzeAssetDataContract,
     fetch: Fetch,
 ):
-    """A bronze asset plus its standard checks.
-
-    The asset reuses the latest S3 snapshot while it is younger than
-    ``contract.freshness["max_days"]``; otherwise it calls ``fetch(context)``,
-    writes a new timestamped snapshot, and emits its stamp. Returns
-    ``(asset, checks)``.
-    """
+    """Bronze asset factory. Reuses S3 snapshot if younger than max_days, else fetches fresh."""
 
     @dg.asset(name=name, group_name="raw_data", metadata=asdict(meta))
     def _asset(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
@@ -51,7 +43,6 @@ def raw_geo_asset(
 
         if age is not None and age <= datetime.timedelta(days=contract.freshness["max_days"]):
             context.log.info(f"Using snapshot for {directory} ({age.days}d old).")
-            # Re-emit the existing stamp unchanged: downstream staleness stays FRESH, no rewrite.
             return dg.MaterializeResult(
                 data_version=dg.DataVersion(s3_datastore.latest_stamp(directory)),
                 metadata={"s3_cache_hit": True},
