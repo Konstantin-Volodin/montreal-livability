@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Montréal Livability Report</title>
+<style>{{ styles|safe }}</style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="hero">
+      <div>
+        <p class="hero-tag">Données ouvertes · Montréal</p>
+        <h1>Montréal Livability Report</h1>
+        <p class="lede" lang="fr">
+          Plus de 500 000 adresses évaluées selon leur proximité aux commerces, écoles, soins de santé, parcs, transports et pistes cyclables.
+        </p>
+        <p class="lede-en">
+          Over 500k addresses scored by proximity to groceries, schools, health care, parks, transit, and bike paths.
+        </p>
+      </div>
+      <div class="hero-meta">Updated {{ updated_on }}</div>
+    </header>
+
+    <section class="overview" aria-label="Report overview">
+      <div class="stats" aria-label="Report summary">
+        {% for label, value in summary_stats %}
+        <div class="stat"><b>{{ value }}</b><span>{{ label }}</span></div>
+        {% endfor %}
+      </div>
+      <div class="amenities" aria-label="Amenity counts">
+        <h2 class="section-label">Commodités <span>Amenities</span></h2>
+        {% for item in category_stats %}
+        <div class="amenity-row">
+          <span>{{ item.label }}</span>
+          <span class="amenity-track"><i style="--share: {{ item.share }}%"></i></span>
+          <b>{{ item.value }}</b>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="explorer" aria-label="Map and ranking">
+      <h2 class="section-label">Carte <span>Map</span></h2>
+      <p class="view-copy">Starts on overall livability. Select categories to rebuild the score from only those amenities.</p>
+      <div class="map-frame">
+        <div class="map-tools" aria-label="Map layers">
+          <span class="tool-label">Custom score</span>
+          {% for metric in map_metrics %}
+          <label>
+            <input type="checkbox" name="map-metric" value="{{ metric.key }}">
+            {{ metric.label }}
+          </label>
+          {% endfor %}
+          <label>
+            <input type="checkbox" id="map-boundaries" checked>
+            Boundaries
+          </label>
+        </div>
+        <iframe class="map" id="livability-map" title="Livability map" srcdoc="{{ map_html }}"></iframe>
+      </div>
+
+      <h2 class="section-label ranking-label">Classement <span>Ranking</span></h2>
+      <p class="view-copy">{{ municipality_count }} municipalities ordered by livability score. Hover a row to highlight it on the map; click to pin it.</p>
+      <div class="table-frame">
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>{% for c in columns %}<th scope="col">{{ c }}</th>{% endfor %}</tr>
+            </thead>
+            <tbody id="ranking-body">
+              {% for row in rows %}
+              <tr data-municipality-key="{{ row.municipality_key }}">
+                <td class="rank">{{ row.rank }}</td>
+                <td class="muni" title="{{ row.municipality }}">{{ row.municipality }}</td>
+                <td>{{ row.addresses }}</td>
+                <td class="liv" style="--score-color: {{ row.livability_bg }}">{{ row.livability }}</td>
+                {% for score in row.scores %}<td>{{ score }}</td>{% endfor %}
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <footer class="foot">
+      <div class="foot-sources">
+        <p class="foot-title">Sources</p>
+        <ul class="sources">
+          <li>
+            <a href="https://donnees.montreal.ca/">Montréal Open Data</a>
+            <span class="src-meta">Addresses · Parks · Bike paths · Boundaries</span>
+          </li>
+          <li>
+            <a href="https://wiki.openstreetmap.org/wiki/Overpass_API">OpenStreetMap</a>
+            <span class="src-meta">Amenities, via the Overpass API</span>
+          </li>
+          <li>
+            <a href="https://www.stm.info/sites/default/files/gtfs/gtfs_stm.zip">STM</a>
+            <span class="src-meta">Transit stops · GTFS feed</span>
+          </li>
+        </ul>
+      </div>
+      <div class="foot-credit">
+        <p class="foot-by">Built by <b>Konstantin Volodin</b></p>
+        <a class="foot-repo" href="https://github.com/Konstantin-Volodin/montreal-livability">View source on GitHub ↗</a>
+      </div>
+    </footer>
+  </div>
+<script>
+  (function () {
+    var rows = Array.prototype.slice.call(
+      document.querySelectorAll("#ranking-body tr")
+    );
+    var selectedMunicipalityKey = null;
+
+    function sendToMap(message) {
+      var frame = document.getElementById("livability-map");
+      if (!frame || !frame.contentWindow) return;
+
+      var direct = {
+        "highlight-municipality": function () {
+          frame.contentWindow.highlightMunicipality(
+            message.municipalityKey,
+            { fit: Boolean(message.fit) }
+          );
+        },
+        "clear-municipality-highlight": function () {
+          frame.contentWindow.clearMunicipalityHighlight();
+        },
+        "set-map-metrics": function () {
+          frame.contentWindow.setMapMetrics(message.metrics);
+        },
+        "set-boundary-visibility": function () {
+          frame.contentWindow.setMunicipalityBoundariesVisible(message.visible);
+        }
+      }[message.type];
+
+      try {
+        if (direct) { direct(); return; }
+      } catch (_error) {
+        // Fall back to postMessage when direct srcdoc access is blocked.
+      }
+
+      frame.contentWindow.postMessage(message, "*");
+    }
+
+    function currentMetrics() {
+      return Array.prototype.map.call(
+        document.querySelectorAll('input[name="map-metric"]:checked'),
+        function (input) { return input.value; }
+      );
+    }
+
+    function highlight(municipalityKey, fit) {
+      sendToMap({
+        type: "highlight-municipality",
+        municipalityKey: municipalityKey,
+        fit: Boolean(fit)
+      });
+    }
+
+    function syncMapState() {
+      var boundaryToggle = document.getElementById("map-boundaries");
+      sendToMap({ type: "set-map-metrics", metrics: currentMetrics() });
+      sendToMap({
+        type: "set-boundary-visibility",
+        visible: !boundaryToggle || boundaryToggle.checked
+      });
+      if (selectedMunicipalityKey) highlight(selectedMunicipalityKey, true);
+    }
+
+    function setActiveRow(municipalityKey) {
+      rows.forEach(function (tr) {
+        tr.classList.toggle(
+          "is-active",
+          Boolean(municipalityKey) &&
+            tr.getAttribute("data-municipality-key") === municipalityKey
+        );
+      });
+    }
+
+    document.querySelectorAll('input[name="map-metric"]').forEach(function (input) {
+      input.addEventListener("change", syncMapState);
+    });
+
+    var boundaryToggle = document.getElementById("map-boundaries");
+    if (boundaryToggle) {
+      boundaryToggle.addEventListener("change", syncMapState);
+    }
+
+    var mapFrame = document.getElementById("livability-map");
+
+    function restoreSelection() {
+      if (selectedMunicipalityKey) highlight(selectedMunicipalityKey, false);
+      else sendToMap({ type: "clear-municipality-highlight" });
+    }
+
+    rows.forEach(function (tr) {
+      var key = tr.getAttribute("data-municipality-key");
+
+      // Hover -> preview the municipality on the map (no zoom, doesn't disturb the pin).
+      tr.addEventListener("mouseenter", function () {
+        highlight(key, false);
+      });
+      tr.addEventListener("mouseleave", restoreSelection);
+
+      // Click -> pin it, fit the map to it, and scroll the map into view.
+      tr.addEventListener("click", function () {
+        selectedMunicipalityKey = key;
+        setActiveRow(selectedMunicipalityKey);
+        highlight(selectedMunicipalityKey, true);
+        if (mapFrame && mapFrame.scrollIntoView) {
+          mapFrame.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
+      });
+    });
+
+    if (mapFrame) mapFrame.addEventListener("load", syncMapState);
+  })();
+</script>
+</body>
+</html>
