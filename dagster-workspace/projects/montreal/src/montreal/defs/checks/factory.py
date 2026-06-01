@@ -182,11 +182,13 @@ def standard_checks(asset: dg.AssetsDefinition, contract) -> list:
                 context.log.info(f"{asset.key.to_user_string()} reused its snapshot; re-emitting {len(prior)} prior check result(s)")
                 for [rec] in prior:
                     e = rec.evaluation
+                    # Keep the original metadata (duplicate_rows, subset, ...) so a reused
+                    # FAIL still alerts with its diagnostic detail; just flag it as reused.
                     yield dg.AssetCheckResult(
                         check_name=e.check_name,
                         passed=e.passed,
                         severity=e.severity or dg.AssetCheckSeverity.ERROR,
-                        metadata={"reused_snapshot": True},
+                        metadata={**(e.metadata or {}), "reused_snapshot": True},
                     )
                 return
 
