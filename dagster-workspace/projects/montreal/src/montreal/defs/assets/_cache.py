@@ -29,6 +29,11 @@ def reuse_if_unchanged(context: dg.AssetExecutionContext) -> dg.MaterializeResul
     """
     instance = context.instance
     asset_key = context.asset_key
+    name = asset_key.to_user_string()
+
+    def miss(reason: str) -> None:
+        """Log why the gate fell through to recompute (one line, INFO)."""
+        context.log.info(f"{name}: cache miss -> recompute ({reason})")
 
     # Scope to this partition: each shard has its own provenance, else we'd
     # compare against whichever partition materialized last.
@@ -37,27 +42,36 @@ def reuse_if_unchanged(context: dg.AssetExecutionContext) -> dg.MaterializeResul
     # Own last materialization -> the input versions + code version it ran with.
     own_record = instance.get_latest_data_version_record(asset_key, partition_key=partition_key)
     if own_record is None:
+        miss("no prior materialization on this instance")
         return None
     provenance = extract_data_provenance_from_entry(own_record.event_log_entry)
     if provenance is None:
+        miss("prior materialization carries no data provenance")
         return None
 
     # A code change must force a recompute even if the inputs are identical.
     current_code_version = context.assets_def.code_versions_by_key.get(asset_key)
     if provenance.code_version != current_code_version:
+        miss(f"code_version changed {provenance.code_version!r} -> {current_code_version!r}")
         return None
 
     # Every upstream's current data version must match what we consumed last time.
     for upstream_key in context.assets_def.dependency_keys:
         upstream_record = instance.get_latest_data_version_record(upstream_key)
         if upstream_record is None:
-            return None  # upstream never materialized -> can't claim a hit
+            miss(f"upstream {upstream_key.to_user_string()} never materialized")
+            return None  # can't claim a hit
         current_version = extract_data_version_from_entry(upstream_record.event_log_entry)
-        if provenance.input_data_versions.get(upstream_key) != current_version:
+        prior = provenance.input_data_versions.get(upstream_key)
+        if prior != current_version:
+            prior_v = prior.value if prior else None
+            current_v = current_version.value if current_version else None
+            miss(f"upstream {upstream_key.to_user_string()} version {prior_v} -> {current_v}")
             return None
 
     prior_version = extract_data_version_from_entry(own_record.event_log_entry)
     if prior_version is None:
+        miss("prior materialization carries no data version")
         return None
 
     context.log.info(
