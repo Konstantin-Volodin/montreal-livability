@@ -83,9 +83,6 @@ class FakeStore(s3_datastore):
     def read_gpq(self, context, address):
         return _READ_FRAME
 
-    def write_check_result(self, context, asset_location, check_name, result):  # no S3 in tests
-        pass
-
 
 def _build(fetch, store):
     """Materialize a freshly-built raw_geo_asset against `store`, returning the result."""

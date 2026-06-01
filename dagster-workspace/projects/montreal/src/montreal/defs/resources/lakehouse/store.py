@@ -25,7 +25,8 @@ _READ_WORKERS = 16
 # base dir). One GET, always consistent -- the pointer to "latest" without a LIST.
 _MANIFEST = "_manifest"
 
-# Subdir under an asset dir holding one JSON per check result; batch.py reads them into a run report.
+# Legacy per-asset check-result subdir (results now live in the Dagster event log);
+# still skipped when reading sharded assets so stale dirs aren't mistaken for data shards.
 _CHECKS = "_checks"
 
 
@@ -97,7 +98,8 @@ class s3_datastore(dg.ConfigurableResource):
             children = list((self._base / prefix).iterdir())
         except FileNotFoundError:
             return []
-        return [f"{prefix}/{p.name}" for p in children if p.is_dir()]
+        # _CHECKS is a sibling meta dir (per-asset check results), not a data shard.
+        return [f"{prefix}/{p.name}" for p in children if p.is_dir() and p.name != _CHECKS]
 
     # --- metadata ------------------------------------------------------------
 
@@ -197,9 +199,11 @@ class s3_datastore(dg.ConfigurableResource):
         name = context.asset_key.path[-1]
         key = f"{location_of(context.assets_def)}.html"
         path = self._base / key
-        # Set ContentType so the object renders inline (S3 console / static hosting) rather than downloading.
-        with path.fs.open(path.path, "wb", s3_additional_kwargs={"ContentType": "text/html"}) as f:
+
+        # Set content_type  so the object renders inline (S3 console / static hosting) rather than downloading.
+        with path.fs.open(path.path, "wb", ContentType="text/html") as f:
             f.write(html.encode("utf-8"))
+
         context.log.info(f"Uploaded HTML to {path}")
         context.add_output_metadata(
             {
@@ -210,20 +214,3 @@ class s3_datastore(dg.ConfigurableResource):
             }
         )
         return now_stamp()
-
-    def write_check_result(self, context, asset_location: str, check_name: str, result: dg.AssetCheckResult) -> None:
-        """Persist a check result as ``{asset}/_checks/{check}.json``.
-
-        The deployed batch runs on a throwaway instance, so check results would otherwise
-        die with the task; this is their durable home, read back into one run report by batch.py.
-        """
-        payload = {
-            "asset": asset_location,
-            "check": check_name,
-            "passed": bool(result.passed),
-            "severity": result.severity.value if result.severity else None,
-            "stamp": now_stamp(),
-            "metadata": {k: getattr(v, "value", v) for k, v in (result.metadata or {}).items()},
-        }
-        (self._base / asset_location / _CHECKS / f"{check_name}.json").write_text(json.dumps(payload, default=str))
-        context.log.info(f"check {check_name} -> {'pass' if result.passed else 'FAIL'} ({asset_location})")

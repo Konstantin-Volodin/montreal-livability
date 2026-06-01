@@ -14,7 +14,9 @@ dependencies = [
     "matplotlib>=3.9.0",
     "pyarrow>=24.0.0",
     "pytest>=9.0.3",
+    "s3fs>=2026.4.0",
     "sqlescapy>=1.0.1",
+    "universal-pathlib>=0.3.10",
 ]
 
 [dependency-groups]

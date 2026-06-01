@@ -16,8 +16,12 @@ common checks:
 import dagster as dg
 import geopandas as gpd
 import pandas as pd
+from dagster._core.storage.asset_check_execution_record import AssetCheckExecutionRecordStatus
 
 from montreal.defs.resources.lakehouse import location_of, s3_datastore
+
+# A check's last *completed* run (excludes this run's just-planned event).
+_DONE = {AssetCheckExecutionRecordStatus.SUCCEEDED, AssetCheckExecutionRecordStatus.FAILED}
 
 
 def _dtype_matches(series: pd.Series, kind: str) -> bool:
@@ -43,14 +47,6 @@ def _read_checked(context, s3_datastore, asset: dg.AssetsDefinition):
     if segmentation in (None, "snapshot"):
         return s3_datastore.read_gpq(context, location)
     return s3_datastore.read_gpq_prefix(context, location)
-
-
-def _checked_location(context, asset: dg.AssetsDefinition) -> str:
-    """Where this run's check results are saved -- the partition's own shard dir, else the
-    asset base. Mirrors `_read_checked` so each partition saves beside the shard it validated
-    instead of every partition clobbering one shared ``_checks`` dir."""
-    location = location_of(asset)
-    return f"{location}/{context.partition_key}" if context.has_partition_key else location
 
 
 def _reused_snapshot(context, asset: dg.AssetsDefinition) -> bool:
@@ -176,20 +172,20 @@ def standard_checks(asset: dg.AssetsDefinition, contract) -> list:
 
     @dg.multi_asset_check(specs=specs, name=f"{asset.key.path[-1]}_contract_checks")
     def _checks(context: dg.AssetCheckExecutionContext, s3_datastore: s3_datastore):
-        location = _checked_location(context, asset)
-
         # Asset re-emitted its cached snapshot (bronze freshness hit): the data is unchanged,
-        # so re-emit the prior verdicts rather than re-reading + re-evaluating S3. (A multi-check
-        # must yield every spec, so this only short-circuits when all priors are on hand.)
+        # so re-emit each check's prior verdict from the event log rather than re-reading S3.
+        # (A multi-check must yield every spec, so this only short-circuits when all priors exist.)
         if _reused_snapshot(context, asset):
-            prior = {spec.key.name: s3_datastore.read_check_result(location, spec.key.name) for spec in specs}
-            if all(prior.values()):
+            els = context.instance.event_log_storage
+            prior = [els.get_asset_check_execution_history(spec.key, limit=1, status=_DONE) for spec in specs]
+            if all(prior):
                 context.log.info(f"{asset.key.to_user_string()} reused its snapshot; re-emitting {len(prior)} prior check result(s)")
-                for name, saved in prior.items():
+                for [rec] in prior:
+                    e = rec.evaluation
                     yield dg.AssetCheckResult(
-                        check_name=name,
-                        passed=bool(saved["passed"]),
-                        severity=dg.AssetCheckSeverity(saved["severity"]) if saved.get("severity") else dg.AssetCheckSeverity.ERROR,
+                        check_name=e.check_name,
+                        passed=e.passed,
+                        severity=e.severity or dg.AssetCheckSeverity.ERROR,
                         metadata={"reused_snapshot": True},
                     )
                 return
@@ -202,8 +198,6 @@ def standard_checks(asset: dg.AssetsDefinition, contract) -> list:
         ]
         if bounds:
             results.append(_value_range_result(df, bounds))
-        for result in results:
-            s3_datastore.write_check_result(context, location, result.check_name, result)
-            yield result
+        yield from results
 
     return [_checks]

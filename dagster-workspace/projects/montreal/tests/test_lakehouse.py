@@ -1,8 +1,7 @@
 """Tests for the S3 lakehouse resource: path/format helpers, WGS84 normalization,
-parquet read fallback, and check-result persistence."""
+and parquet read fallback."""
 
 import io
-import json
 import re
 
 import dagster as dg
@@ -19,14 +18,6 @@ from montreal.defs.resources.lakehouse.paths import now_stamp
 
 
 # --- pure helpers ---------------------------------------------------------
-
-
-class _Ctx:
-    class _Log:
-        def info(self, *a, **k):
-            pass
-
-    log = _Log()
 
 
 def test_location_of_is_layer_over_asset_name():
@@ -75,19 +66,3 @@ def test_preview_drops_geometry():
     assert "name" in md and "geometry" not in md
 
 
-def test_write_check_result_persists_normalized_json():
-    store = s3_datastore(bucket_name="b", region_name="r")
-    store._base = UPath("memory://lakehouse/")  # in-process fsspec backend, no S3 needed
-    result = dg.AssetCheckResult(
-        passed=False,
-        severity=dg.AssetCheckSeverity.ERROR,
-        metadata={"duplicate_rows": 3, "subset": dg.MetadataValue.json(["ID_UEV"])},
-    )
-    store.write_check_result(_Ctx(), "silver/amenities", "row_uniqueness", result)
-
-    written = (store._base / "silver/amenities/_checks/row_uniqueness.json").read_text()
-    payload = json.loads(written)
-    assert payload["passed"] is False and payload["severity"] == "ERROR"
-    # MetadataValue and raw values both land as plain JSON.
-    assert payload["metadata"]["duplicate_rows"] == 3
-    assert payload["metadata"]["subset"] == ["ID_UEV"]
