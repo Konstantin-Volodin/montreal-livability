@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Fire the monthly run now, instead of waiting for the 1st.
 
-Starts the Step Functions state machine (which launches the Fargate Spot task and
-retries on interruption), reading the stack's CloudFormation outputs:
+Launches the Fargate task directly with ecs:RunTask, reading the cluster, task def,
+and network config from the stack's CloudFormation outputs:
 
     python run.py                # stack LivabilityStack
     STACK_NAME=other python run.py
@@ -25,10 +25,24 @@ def stack_outputs(stack_name: str) -> dict[str, str]:
 
 def main() -> int:
     out = stack_outputs(STACK_NAME)
-    response = boto3.client("stepfunctions", region_name=REGION).start_execution(
-        stateMachineArn=out["StateMachineArn"]
+    response = boto3.client("ecs", region_name=REGION).run_task(
+        cluster=out["ClusterArn"],
+        taskDefinition=out["TaskDefinitionArn"],
+        launchType="FARGATE",
+        count=1,
+        networkConfiguration={
+            "awsvpcConfiguration": {
+                "subnets": out["Subnets"].split(","),
+                "securityGroups": [out["SecurityGroupId"]],
+                "assignPublicIp": "ENABLED",
+            }
+        },
     )
-    print(f"Started execution {response['executionArn']}")
+    tasks, failures = response.get("tasks", []), response.get("failures", [])
+    if failures:
+        print(f"run-task failed: {failures}")
+        return 1
+    print(f"Started task {tasks[0]['taskArn']}")
     print("Logs: CloudWatch log group /ecs/livability")
     return 0
 

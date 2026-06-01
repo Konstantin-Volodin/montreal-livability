@@ -1,6 +1,6 @@
 """
 Monthly Fargate batch. No always-on infra.
-EventBridge Scheduler -> ECS RunTask -> one-shot `montreal` container -> exits. 
+EventBridge Scheduler -> ECS RunTask -> one-shot `montreal` container -> exits.
 """
 
 import os
@@ -20,7 +20,6 @@ from aws_cdk import (
     aws_scheduler as scheduler,
     aws_sns as sns,
     aws_sns_subscriptions as subscriptions,
-    aws_stepfunctions as sfn,
 )
 from constructs import Construct
 
@@ -57,11 +56,13 @@ class LivabilityStack(cdk.Stack):
         image = self._image()
         alert_topic = self._alerts(alert_email)
         task_definition = self._task_definition(image, data_bucket, data_region, alert_topic, file_system, access_point, cpu=cpu, memory_limit_mib=memory_limit_mib)
-        state_machine = self._state_machine(vpc, cluster, task_definition, task_sg)
-        self._schedule(state_machine, schedule_expression, schedule_state)
+        self._schedule(vpc, cluster, task_definition, task_sg, schedule_expression, schedule_state)
 
-        # Consumed by run.py to fire an on-demand execution.
-        cdk.CfnOutput(self, "StateMachineArn", value=state_machine.state_machine_arn)
+        # Consumed by run.py to fire an on-demand ecs:RunTask.
+        cdk.CfnOutput(self, "ClusterArn", value=cluster.cluster_arn)
+        cdk.CfnOutput(self, "TaskDefinitionArn", value=task_definition.task_definition_arn)
+        cdk.CfnOutput(self, "Subnets", value=",".join(s.subnet_id for s in vpc.public_subnets))
+        cdk.CfnOutput(self, "SecurityGroupId", value=task_sg.security_group_id)
 
 
     def _network(self) -> tuple[ec2.Vpc, ecs.Cluster]:
@@ -72,7 +73,7 @@ class LivabilityStack(cdk.Stack):
             subnet_configuration=[ec2.SubnetConfiguration(name="public", subnet_type=ec2.SubnetType.PUBLIC, cidr_mask=24)],
         )
         vpc.add_gateway_endpoint("S3Endpoint", service=ec2.GatewayVpcEndpointAwsService.S3)
-        cluster = ecs.Cluster(self, "LivabilityCluster", vpc=vpc, enable_fargate_capacity_providers=True)
+        cluster = ecs.Cluster(self, "LivabilityCluster", vpc=vpc)
         return vpc, cluster
 
 
@@ -194,73 +195,19 @@ class LivabilityStack(cdk.Stack):
         alert_topic.grant_publish(task_definition.task_role)
         return task_definition
 
-    def _state_machine(self, vpc: ec2.Vpc, cluster: ecs.Cluster, task_definition: ecs.FargateTaskDefinition, task_sg: ec2.SecurityGroup) -> sfn.StateMachine:
-        """ecs:runTask.sync on on-demand Fargate, wrapped so a transient placement/infra
-        failure relaunches the task. Each relaunch is cheap/idempotent - the S3 cache
-        skips already-materialized work and the EFS-persisted instance carries over."""
-
-        run_task = sfn.CustomState(
-            self,
-            "RunLivability",
-            state_json={
-                "Type": "Task",
-                "Resource": "arn:aws:states:::ecs:runTask.sync",
-                "Parameters": {
-                    "Cluster": cluster.cluster_arn,
-                    "TaskDefinition": task_definition.task_definition_arn,
-                    "LaunchType": "FARGATE",
-                    "NetworkConfiguration": {
-                        "AwsvpcConfiguration": {
-                            "Subnets": [s.subnet_id for s in vpc.public_subnets],
-                            "SecurityGroups": [task_sg.security_group_id],
-                            "AssignPublicIp": "ENABLED",
-                        }
-                    },
-                },
-                # On-demand: no Spot interruptions, so retries only cover transient
-                # placement/infra failures. A relaunch is still cheap and idempotent.
-                "Retry": [{
-                    "ErrorEquals": ["States.TaskFailed", "States.Timeout"],
-                    "IntervalSeconds": 30, "MaxAttempts": 2, "BackoffRate": 1.5,
-                }],
-            },
-        )
-
-        state_machine = sfn.StateMachine(
-            self,
-            "LivabilityStateMachine",
-            definition_body=sfn.DefinitionBody.from_chainable(run_task),
-            timeout=cdk.Duration.hours(6),
-        )
-
-        # CustomState gets none of the auto-IAM the L2 EcsRunTask would add, so grant it
-        # by hand: RunTask + the lifecycle/PassRole perms .sync needs, plus the managed
-        # EventBridge rule it uses to wait for the task to finish.
-        role = state_machine.role
-        role.add_to_principal_policy(iam.PolicyStatement(
+    def _schedule(self, vpc: ec2.Vpc, cluster: ecs.Cluster, task_definition: ecs.FargateTaskDefinition, task_sg: ec2.SecurityGroup, schedule_expression: str, schedule_state: str) -> None:
+        """Monthly EventBridge Scheduler -> ECS RunTask (on-demand Fargate) directly. No
+        state machine: a one-shot batch on durable infra has nothing transient to retry,
+        and a missed month just runs on the next schedule (or via run.py)."""
+        scheduler_role = iam.Role(self, "LivabilitySchedulerRole", assumed_by=iam.ServicePrincipal("scheduler.amazonaws.com"))
+        scheduler_role.add_to_policy(iam.PolicyStatement(
             actions=["ecs:RunTask"], resources=[task_definition.task_definition_arn],
             conditions={"ArnLike": {"ecs:cluster": cluster.cluster_arn}},
         ))
-        role.add_to_principal_policy(iam.PolicyStatement(
-            actions=["ecs:StopTask", "ecs:DescribeTasks"], resources=["*"],
-        ))
-        role.add_to_principal_policy(iam.PolicyStatement(
+        scheduler_role.add_to_policy(iam.PolicyStatement(
             actions=["iam:PassRole"],
             resources=[task_definition.task_role.role_arn, task_definition.execution_role.role_arn],
             conditions={"StringLike": {"iam:PassedToService": "ecs-tasks.amazonaws.com"}},
-        ))
-        role.add_to_principal_policy(iam.PolicyStatement(
-            actions=["events:PutTargets", "events:PutRule", "events:DescribeRule"],
-            resources=[f"arn:aws:events:{self.region}:{self.account}:rule/StepFunctionsGetEventsForECSTaskRule"],
-        ))
-        return state_machine
-
-    def _schedule(self, state_machine: sfn.StateMachine, schedule_expression: str, schedule_state: str) -> None:
-        """Monthly EventBridge Scheduler -> Step Functions StartExecution (the state
-        machine owns task launch + transient-failure retries)."""
-        scheduler_role = iam.Role(self, "LivabilitySchedulerRole", assumed_by=iam.ServicePrincipal("scheduler.amazonaws.com"))
-        scheduler_role.add_to_policy(iam.PolicyStatement(
-            actions=["states:StartExecution"], resources=[state_machine.state_machine_arn],
         ))
 
         scheduler.CfnSchedule(
@@ -269,11 +216,22 @@ class LivabilityStack(cdk.Stack):
             flexible_time_window=scheduler.CfnSchedule.FlexibleTimeWindowProperty(mode="OFF"),
             state=schedule_state,  # DISABLED pauses the monthly run; run.py still works
             schedule_expression=schedule_expression,
-            schedule_expression_timezone="UTC",
+            schedule_expression_timezone="America/Toronto",  # 1 AM Eastern (DST-aware)
             target=scheduler.CfnSchedule.TargetProperty(
-                arn=state_machine.state_machine_arn,
+                arn=cluster.cluster_arn,
                 role_arn=scheduler_role.role_arn,
-                # No scheduler-level retry: the state machine handles relaunches.
+                ecs_parameters=scheduler.CfnSchedule.EcsParametersProperty(
+                    task_definition_arn=task_definition.task_definition_arn,
+                    launch_type="FARGATE",
+                    task_count=1,
+                    network_configuration=scheduler.CfnSchedule.NetworkConfigurationProperty(
+                        awsvpc_configuration=scheduler.CfnSchedule.AwsVpcConfigurationProperty(
+                            subnets=[s.subnet_id for s in vpc.public_subnets],
+                            security_groups=[task_sg.security_group_id],
+                            assign_public_ip="ENABLED",
+                        )
+                    ),
+                ),
                 retry_policy=scheduler.CfnSchedule.RetryPolicyProperty(maximum_retry_attempts=0),
             ),
         )
