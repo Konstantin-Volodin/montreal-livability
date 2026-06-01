@@ -18,6 +18,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 import boto3
@@ -31,6 +33,12 @@ _DONE = {AssetCheckExecutionRecordStatus.SUCCEEDED, AssetCheckExecutionRecordSta
 
 MODULE = "montreal.definitions"
 R6_PARTITIONS = "address_r6"
+
+# Concurrent r6 partition runs. Each is its own `dagster asset materialize` process doing
+# memory-heavy geo joins; pinned to match the task's 2 vCPU / 8 GB (memory is the ceiling,
+# not cores). The processes share one local-disk SQLite instance, which takes concurrent
+# writers fine. Override via env.
+PARTITION_CONCURRENCY = int(os.environ.get("PARTITION_CONCURRENCY", "2"))
 
 S3_BUCKET = os.environ.get("S3_BUCKET")
 S3_REGION = os.environ.get("S3_REGION", "ca-central-1")
@@ -110,14 +118,35 @@ def report_quality(run_stamp: str) -> None:
         print(f"alerted on {len(errors)} ERROR failure(s)", flush=True)
 
 
+def materialize_partitions(partitions: list[str]) -> None:
+    """Materialize distances once per r6 partition, PARTITION_CONCURRENCY at a time.
+
+    Concurrent runs share one stdout, so each partition's output is captured and printed
+    as a contiguous block (a one-line status on success, the full log on failure). Raises
+    if any partition fails, so the batch surfaces it instead of silently moving to gold."""
+    cmd = lambda p: ["dagster", "asset", "materialize", "-m", MODULE, "--select", "distances_to_amenities", "--partition", p]
+    failed, done = [], 0
+    with ThreadPoolExecutor(max_workers=PARTITION_CONCURRENCY) as pool:
+        futures = {pool.submit(subprocess.run, cmd(p), capture_output=True, text=True): p for p in partitions}
+        for future in as_completed(futures):
+            partition, result, done = futures[future], future.result(), done + 1
+            ok = result.returncode == 0
+            print(f"  [{done}/{len(partitions)}] {partition} {'ok' if ok else 'FAILED'}", flush=True)
+            if not ok:
+                failed.append(partition)
+                print(result.stdout, result.stderr, sep="\n", file=sys.stderr, flush=True)
+    if failed:
+        raise RuntimeError(f"{len(failed)}/{len(partitions)} distance partition(s) failed: {sorted(failed)}")
+
+
 def main() -> int:
     with efs_state():
         # pre partitioned section
         subprocess.run(["dagster", "job", "execute", "-m", MODULE, "-j", "pre_partition_job"], check=True)
 
-        # partitioned section
+        # partitioned section: distances, PARTITION_CONCURRENCY partitions at a time
         with DagsterInstance.get() as instance: partitions = sorted(instance.get_dynamic_partitions(R6_PARTITIONS))
-        for p in partitions: subprocess.run(["dagster", "asset", "materialize", "-m", MODULE, "--select", "distances_to_amenities", "--partition", p], check=True)
+        materialize_partitions(partitions)
 
         # gold layer
         subprocess.run(["dagster", "job", "execute", "-m", MODULE, "-j", "gold_job"], check=True)
