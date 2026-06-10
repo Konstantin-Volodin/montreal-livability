@@ -9,8 +9,6 @@ and network config from the stack's CloudFormation outputs:
 
 """
 
-from __future__ import annotations
-
 import os
 import boto3
 

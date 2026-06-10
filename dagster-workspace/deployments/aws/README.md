@@ -20,15 +20,15 @@ EventBridge Scheduler ──(monthly, 1 AM Eastern)──▶ ECS RunTask (Fargat
 
 ## Config
 
-Resolved as CDK context (`-c key=value`) → env var → default:
+Defaults live in `app.py`; override any with `cdk deploy -c key=value`:
 
-| Setting             | Key / env                                     | Default               |
-| ------------------- | --------------------------------------------- | --------------------- |
-| Data bucket         | `data_bucket` / `S3_BUCKET`                   | `montreal-livability` |
-| Region              | `data_region` / `S3_REGION`                   | `ca-central-1`        |
-| Schedule (cron)     | `schedule_expression` / `SCHEDULE_EXPRESSION` | `cron(0 1 1 * ? *)`   |
-| Schedule state      | `schedule_state` / `SCHEDULE_STATE`           | `ENABLED`             |
-| Alert email         | `alert_email` / `ALERT_EMAIL`                 | (see `app.py`)        |
+| Setting         | Key                   | Default               |
+| --------------- | --------------------- | --------------------- |
+| Data bucket     | `data_bucket`         | `montreal-livability` |
+| Region          | `data_region`         | `ca-central-1`        |
+| Schedule (cron) | `schedule_expression` | `cron(0 1 1 * ? *)`   |
+| Schedule state  | `schedule_state`      | `ENABLED`             |
+| Alert email     | `alert_email`         | (see `app.py`)        |
 
 `cron(0 1 1 * ? *)` is the 1st of the month at **01:00 `America/Toronto`** (Eastern,
 DST-aware). The bucket must already exist (this stack never creates or deletes it).
