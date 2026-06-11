@@ -54,11 +54,12 @@ def _reused_snapshot(context, asset: dg.AssetsDefinition) -> bool:
     (bronze freshness hit, ``s3_cache_hit``): the data is unchanged, so its prior check
     results still stand and the checks need not re-read + re-evaluate.
 
-    Partition-scoped: a partitioned asset checks one shard per run, so read that
-    partition's own latest materialization -- not whichever partition happened to
-    materialize last (which is what an unpartitioned lookup would return)."""
-    partition_key = context.partition_key if context.has_partition_key else None
-    record = context.instance.get_latest_data_version_record(asset.key, partition_key=partition_key)
+    Unpartitioned assets only: check verdict history isn't partition-scoped, so reusing
+    on a partitioned asset would re-emit whichever partition's verdict landed last.
+    A partitioned cache hit re-reads its single shard instead -- cheap and correct."""
+    if context.has_partition_key:
+        return False
+    record = context.instance.get_latest_data_version_record(asset.key)
     materialization = record.event_log_entry.asset_materialization if record else None
     flag = materialization.metadata.get("s3_cache_hit") if materialization else None
     return bool(getattr(flag, "value", flag))

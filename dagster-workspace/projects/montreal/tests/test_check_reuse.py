@@ -11,7 +11,7 @@ import pandas as pd
 from dagster import DagsterInstance
 
 from montreal.defs.assets.gold._config import GoldAssetDataContract
-from montreal.defs.checks.factory import standard_checks
+from montreal.defs.checks.factory import _reused_snapshot, standard_checks
 from montreal.defs.resources.lakehouse import s3_datastore
 
 # A frame that fails row_uniqueness on h3_r10 (two identical keys).
@@ -59,6 +59,16 @@ def _run(instance) -> dict[str, dg.AssetCheckEvaluation]:
 
 def _meta(ev) -> dict:
     return {k: getattr(v, "value", v) for k, v in (ev.metadata or {}).items()}
+
+
+def test_partitioned_check_never_reuses():
+    # Verdict history isn't partition-scoped, so a partitioned cache hit must
+    # re-evaluate rather than risk re-emitting another partition's verdict. The
+    # bare context would raise on any instance access past the partition gate.
+    class Ctx:
+        has_partition_key = True
+
+    assert _reused_snapshot(Ctx(), reuse_fixture) is False
 
 
 def test_reused_failing_check_keeps_its_diagnostic_metadata(tmp_path):
