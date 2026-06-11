@@ -142,9 +142,19 @@ class s3_datastore(dg.ConfigurableResource):
 
         gdf = frames.to_wgs84(gdf)
         stamp = now_stamp()
+        written_dirs = set()
         for value, group in gdf.groupby(column, sort=False):
-            self._put_snapshot(self.asset_dir(context, str(value)), frames.to_parquet_bytes(group), stamp)
-        written = int(gdf[column].nunique())
+            directory = self.asset_dir(context, str(value))
+            self._put_snapshot(directory, frames.to_parquet_bytes(group), stamp)
+            written_dirs.add(directory)
+        written = len(written_dirs)
+
+        # A shard whose value vanished would otherwise be read forever by
+        # read_gpq_prefix (and the contract checks); the writer owns the prefix.
+        for stale in sorted(set(self._shard_dirs(self.asset_dir(context))) - written_dirs):
+            path = self._base / stale
+            path.fs.rm(path.path, recursive=True)
+            context.log.info(f"Removed stale shard {path}")
 
         # Base dir has no snapshot of its own; an empty manifest marks the sharded asset.
         self._write_manifest(self.asset_dir(context), None)

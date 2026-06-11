@@ -1,7 +1,8 @@
 """Tests for the S3 lakehouse resource: path/format helpers, WGS84 normalization,
-and parquet read fallback."""
+parquet read fallback, and sharded-write reconciliation."""
 
 import io
+import logging
 import re
 
 import dagster as dg
@@ -60,3 +61,48 @@ def test_preview_drops_geometry():
     geo = gpd.GeoDataFrame({"name": ["x"]}, geometry=[Point(0, 0)], crs=4326)
     md = preview(geo)
     assert "name" in md and "geometry" not in md
+
+
+
+
+@dg.asset(name="sharded_fixture", metadata={"layer": "silver", "segmentation": "h3_r6"})
+def sharded_fixture(): ...
+
+
+class _Ctx:
+    log = logging.getLogger("test_lakehouse")
+    assets_def = sharded_fixture
+    asset_key = sharded_fixture.key
+    has_partition_key = False
+
+    def add_output_metadata(self, metadata):
+        pass
+
+
+def _memory_store(root: str) -> s3_datastore:
+    """Store over fsspec's memory filesystem -- S3-like (implicit dirs), no AWS."""
+    store = s3_datastore(bucket_name="unused", region_name="unused")
+    store._base = UPath(f"memory://{root}")
+    return store
+
+
+def _shard_frame(cells: list[str]) -> gpd.GeoDataFrame:
+    return gpd.GeoDataFrame(
+        {"h3_r6": cells}, geometry=[Point(-73.6, 45.5)] * len(cells), crs=4326
+    )
+
+
+def test_write_gpq_partitioned_removes_stale_shards():
+    store, ctx = _memory_store("stale_shards"), _Ctx()
+    base = location_of(sharded_fixture)
+    (store._base / base / "_checks").mkdir(parents=True)  # meta dir, must survive
+
+    store.write_gpq_partitioned(ctx, _shard_frame(["A", "A", "B"]), "h3_r6")
+    assert set(store._shard_dirs(base)) == {f"{base}/A", f"{base}/B"}
+
+    store.write_gpq_partitioned(ctx, _shard_frame(["A"]), "h3_r6")  # B vanished
+    assert set(store._shard_dirs(base)) == {f"{base}/A"}
+    assert (store._base / base / "_checks").exists()
+
+    combined = store.read_gpq_prefix(ctx, base)
+    assert list(combined["h3_r6"]) == ["A"]
