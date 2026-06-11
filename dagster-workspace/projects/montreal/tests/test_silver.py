@@ -83,6 +83,37 @@ def test_haversine_zero_for_identical_points_and_known_arc():
     assert d[0] == pytest.approx(111_319, rel=1e-3)
 
 
+def test_haversine_east_west_arc_shrinks_with_latitude():
+    # 1° of longitude at 45.5°N spans cos(45.5°) of an equatorial degree. Swapping
+    # the lat/lng argument roles would put the cos factor on the wrong coordinate.
+    lat, lng = MONTREAL
+    d = haversine(np.array([lng]), np.array([lat]), np.array([lng + 1.0]), np.array([lat]))
+    assert d[0] == pytest.approx(111_319 * np.cos(np.radians(lat)), rel=1e-2)
+
+
+def test_nearest_returns_true_meridian_distance():
+    # Amenity 0.005° due north of the address: ~557 m at any longitude. Feeding
+    # nearest()'s lat/lng columns to haversine in the wrong order would scale
+    # this by cos(73.6°) and report ~157 m.
+    lat, lng = MONTREAL
+    addresses = pd.DataFrame(
+        {"h3_r10": [h3.latlng_to_cell(lat, lng, 10)], "lat": [lat], "lng": [lng]}
+    )
+    amenity_lat = lat + 0.005
+    amenity = pd.DataFrame(
+        {
+            "category": ["grocery"],
+            "h3_r10": [h3.latlng_to_cell(amenity_lat, lng, 10)],
+            "lat": [amenity_lat],
+            "lng": [lng],
+        }
+    )
+
+    out = nearest(addresses, amenity)
+
+    assert out["dist_grocery"].iloc[0] == pytest.approx(556.6, rel=2e-2)
+
+
 def test_nearest_finds_same_cell_amenity_and_leaves_empty_categories_nan():
     lat, lng = MONTREAL
     cell = h3.latlng_to_cell(lat, lng, 10)
