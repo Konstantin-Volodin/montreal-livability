@@ -48,15 +48,11 @@ def test_case_a_partition_provenance_records_unpartitioned_upstream():
 
     rec_a = instance.get_latest_data_version_record(down_key, partition_key="a")
     rec_b = instance.get_latest_data_version_record(down_key, partition_key="b")
-    print("CASE A own version a:", extract_data_version_from_entry(rec_a.event_log_entry))
-    print("CASE A own version b:", extract_data_version_from_entry(rec_b.event_log_entry))
 
     prov_a = extract_data_provenance_from_entry(rec_a.event_log_entry)
-    print("CASE A partition a provenance input_data_versions:", prov_a.input_data_versions)
-    print("CASE A partition a code_version:", prov_a.code_version)
-
     assert up_key in prov_a.input_data_versions, set(prov_a.input_data_versions)
     assert prov_a.input_data_versions[up_key] == dg.DataVersion("UP_V1")
+    assert prov_a.code_version == "d1"
     assert extract_data_version_from_entry(rec_a.event_log_entry) == dg.DataVersion("DOWN_a")
     assert extract_data_version_from_entry(rec_b.event_log_entry) == dg.DataVersion("DOWN_b")
 
@@ -88,29 +84,24 @@ def test_case_b_what_is_recorded_for_partitioned_upstream():
 
     down_rec = instance.get_latest_data_version_record(down_key)
     prov = extract_data_provenance_from_entry(down_rec.event_log_entry)
-    print("CASE B downstream provenance input_data_versions:", prov.input_data_versions)
-    print("CASE B keys present:", set(prov.input_data_versions))
+    recorded = prov.input_data_versions.get(up_key)
+    assert recorded is not None, set(prov.input_data_versions)
 
-    bare = instance.get_latest_data_version_record(up_key)
-    print("CASE B bare latest record partition:", None if bare is None else bare.partition_key)
-    print("CASE B bare latest version:",
-          None if bare is None else extract_data_version_from_entry(bare.event_log_entry))
-
+    # Each partition's own version is individually retrievable...
     for pk in ("a", "b", "c"):
         r = instance.get_latest_data_version_record(up_key, partition_key=pk)
-        print(f"CASE B upstream[{pk}] version:",
-              None if r is None else extract_data_version_from_entry(r.event_log_entry))
+        assert extract_data_version_from_entry(r.event_log_entry) == dg.DataVersion(f"UP_{pk}")
 
-    recorded = prov.input_data_versions.get(up_key)
-    print("CASE B recorded input version for partitioned upstream:", recorded)
-
+    # ...but the recorded input is an aggregate over them: deterministic across an
+    # unchanged re-run, yet not equal to any single latest-record read. That mismatch
+    # is why reuse_if_unchanged always recomputes below a partitioned upstream.
     assert dg.materialize(
         [_pb_part_upstream, _pb_downstream], instance=instance, selection=[_pb_downstream],
     ).success
     down_rec2 = instance.get_latest_data_version_record(down_key)
     prov2 = extract_data_provenance_from_entry(down_rec2.event_log_entry)
-    recorded2 = prov2.input_data_versions.get(up_key)
-    print("CASE B recorded input version after unchanged re-run:", recorded2)
-    assert recorded == recorded2
+    assert prov2.input_data_versions.get(up_key) == recorded
 
+    bare = instance.get_latest_data_version_record(up_key)
     assert recorded != extract_data_version_from_entry(bare.event_log_entry)
+    assert recorded not in {dg.DataVersion(f"UP_{pk}") for pk in ("a", "b", "c")}
