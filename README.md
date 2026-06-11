@@ -2,7 +2,7 @@
 
 **Goal:** Dagster pipeline that computes a livability score for every address in Montreal.
 
-**Extension:** Where to live based on your actual life" recommender.
+**Extension:** "Where to live based on your actual life" recommender.
 
 **Output:** [Interactive report of Montreal livability score.](https://montreal-livability.s3.ca-central-1.amazonaws.com/gold/livability_map.html)
 
@@ -11,11 +11,10 @@
 - *dagster* for orchestration - matches LL's primary tool. 
 - *s3* for parquet storage - standard data lake pattern; timestamped snapshots + a manifest pointer, reads resolve "latest"
 - *Folium* for map visualization - Pythonic wrapper around Leaflet, easy to generate interactive HTML maps
-- *Geopandas* as needed - for any geometry manipulation that DuckDB can't handle natively
+- *Geopandas* for geometry work - CRS handling, spatial joins, GeoParquet I/O
 - *H3* for spatial indexing - critical for efficient distance calculations at scale
 - *asset checks* for data quality - schema/uniqueness/completeness/bounds, factory-wired per contract
 - *aws fargate* for deployment - monthly one-shot batch, no always-on infra (ca-central-1)
-- (to add) *DuckDB* for SQL querying and distance calculations - fast, single-binary, native spatial extension
 
 
 ## 2. Data Sources
@@ -47,7 +46,7 @@
 - 6 scored categories total: `grocery`, `school`, `health`, `transit`, `park`, `bike`
 
 ### Distance + Score layer
-- For each address, compute distance to nearest POI of each category. (use h3 kring )
+- For each address, compute distance to nearest POI of each category. (use h3 grid_ring)
 - score distance to 0–100 based on thresholds (e.g., 100m or less = 100 points, 500m = 50 points, etc.)
 - final livability score = 0.2 * grocery + 0.2 * transit + 0.2 * park + 0.15 * bike + 0.15 * school + 0.10 * health
 
@@ -74,6 +73,7 @@ Folium choropleth: aggregate scores to `h3_r9` cells, color by mean livability, 
 - p1 - personalized recommender
 - p2 - city optimization - where to build new amenities to maximize livability improvements?
 - data: rent overlay
+- perf: DuckDB at the read/aggregate layer only (gold reads + checks, manifest-resolved file lists) if memory becomes the ceiling - geo/H3 logic stays in geopandas
 
 ### Personalized Recommender
 The base livability layer is reusable. Add these assets on top:
