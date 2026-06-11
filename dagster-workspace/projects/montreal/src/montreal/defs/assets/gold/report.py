@@ -16,8 +16,8 @@ POI_LABELS = {
     "park": "Parks", "transit": "Transit", "bike": "Bike paths",
 }
 TABLE_LABELS = {
-    "grocery": "Gro.", "school": "Sch.", "health": "Health",
-    "transit": "Transit", "park": "Park", "bike": "Bike",
+    "grocery": "Grocery", "school": "Schools", "health": "Health",
+    "transit": "Transit", "park": "Parks", "bike": "Bike paths",
 }
 SCORE_WEIGHTS = {f"score_{c}": w for c, w in DEFAULT_WEIGHTS.items()}
 TEMPLATES = Path(__file__).parent / "templates"
@@ -26,12 +26,12 @@ ENV = Environment(
     trim_blocks=True, lstrip_blocks=True,
 )
 REPORT_CSS = (TEMPLATES / "report.css").read_text(encoding="utf-8")
-COLORMAP = cm.LinearColormap(
-    ["#d7191c", "#fdae61", "#ffffbf", "#a6d96a", "#1a9641"],
-    vmin=0.0,
-    vmax=100.0,
-    caption="Score (0-100)",
-)
+SCORE_COLORS = ["#d7191c", "#fdae61", "#ffffbf", "#a6d96a", "#1a9641"]
+COLOR_STOPS = [  # [score, [r, g, b]] pairs for the in-map JS colormap; mirrors COLORMAP
+    [i * 100 // (len(SCORE_COLORS) - 1), [int(c[j:j + 2], 16) for j in (1, 3, 5)]]
+    for i, c in enumerate(SCORE_COLORS)
+]
+COLORMAP = cm.LinearColormap(SCORE_COLORS, vmin=0.0, vmax=100.0, caption="Score (0-100)")
 
 
 def _key(value: object) -> str:
@@ -102,10 +102,9 @@ def build_map_html(hexes: pd.DataFrame, boundaries: pd.DataFrame) -> str:
     )
     hex_layer.add_to(fmap)
 
-    boundary_collection = _boundary_feature_collection(boundaries)
     bounds = folium.FeatureGroup(name="Municipality boundaries", show=True)
     folium.GeoJson(
-        boundary_collection,
+        _boundary_feature_collection(boundaries),
         style_function=lambda _: {"fill": False, "color": "#39495c", "weight": 0.8, "opacity": 0.48},
         tooltip=folium.GeoJsonTooltip(fields=["municipality"], aliases=["Municipality"]),
     ).add_to(bounds)
@@ -115,8 +114,7 @@ def build_map_html(hexes: pd.DataFrame, boundaries: pd.DataFrame) -> str:
     map_script = ENV.get_template("map.html").render(
         map_name=fmap.get_name(), hex_layer_name=hex_layer.get_name(),
         boundary_group_name=bounds.get_name(),
-        boundary_features={_key(f["properties"]["municipality"]): f for f in boundary_collection["features"]},
-        metric_weights=SCORE_WEIGHTS,
+        color_stops=COLOR_STOPS, metric_weights=SCORE_WEIGHTS,
     )
     return map_html.replace(
         "</html>",
@@ -152,7 +150,10 @@ def render_report(*, stats: dict, table: pd.DataFrame, map_html: str) -> str:
             "rank": rank, "municipality": str(r.municipality), "municipality_key": _key(r.municipality),
             "addresses": f"{int(r.addresses):,}", "livability": f"{r.livability:.1f}",
             "livability_bg": COLORMAP(r.livability),
-            "scores": [f"{getattr(r, f'score_{c}'):.0f}" for c in POI_CATEGORIES],
+            "scores": [
+                {"value": f"{s:.0f}", "color": COLORMAP(s)}
+                for s in (getattr(r, f"score_{c}") for c in POI_CATEGORIES)
+            ],
         }
         for rank, r in enumerate(table.itertuples(index=False), 1)
     ]

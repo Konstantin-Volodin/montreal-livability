@@ -357,6 +357,9 @@ th:nth-child(1), td:nth-child(1) { left:0; z-index:3; min-width:54px; }
 th:nth-child(2), td:nth-child(2) { left:54px; z-index:3; min-width:260px; }
 th:nth-child(3), td:nth-child(3) { left:314px; z-index:3; min-width:112px; }
 th:nth-child(4), td:nth-child(4) { left:426px; z-index:3; min-width:104px; }
+/* Spread the slack across the score columns; otherwise it all pools after Municipality.
+   Only non-sticky columns, so the pinned offsets above stay exact under overflow. */
+th:nth-child(n+5), td:nth-child(n+5) { width:9.5%; }
 th {
   position:sticky;
   top:0;
@@ -370,6 +373,7 @@ th {
   border-bottom:1px solid var(--line);
 }
 th:nth-child(-n+4) { z-index:5; background:#f6f8fb; }
+tbody tr { cursor:pointer; }  /* rows highlight/pin the map */
 tbody tr:hover, tbody tr.is-active { background:#eaf4ff; }
 tbody tr:hover td, tbody tr.is-active td { background:#eaf4ff; }
 tbody tr.is-active td.muni { color:var(--blue); }
@@ -387,6 +391,12 @@ td.rank {
 td.liv {
   box-shadow:inset 5px 0 var(--score-color);
   font-weight:800;
+}
+/* Heatmap tint: every scored cell carries its colormap color at low strength. */
+td.liv, td.score { background:color-mix(in srgb, var(--score-color) 22%, var(--paper)); }
+tbody tr:hover td.liv, tbody tr:hover td.score,
+tbody tr.is-active td.liv, tbody tr.is-active td.score {
+  background:color-mix(in srgb, var(--score-color) 22%, #eaf4ff);
 }
 
 /* footer */

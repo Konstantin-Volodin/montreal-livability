@@ -75,7 +75,7 @@
                 <td class="muni" title="{{ row.municipality }}">{{ row.municipality }}</td>
                 <td>{{ row.addresses }}</td>
                 <td class="liv" style="--score-color: {{ row.livability_bg }}">{{ row.livability }}</td>
-                {% for score in row.scores %}<td>{{ score }}</td>{% endfor %}
+                {% for score in row.scores %}<td class="score" style="--score-color: {{ score.color }}">{{ score.value }}</td>{% endfor %}
               </tr>
               {% endfor %}
             </tbody>
@@ -117,33 +117,7 @@
 
     function sendToMap(message) {
       var frame = document.getElementById("livability-map");
-      if (!frame || !frame.contentWindow) return;
-
-      var direct = {
-        "highlight-municipality": function () {
-          frame.contentWindow.highlightMunicipality(
-            message.municipalityKey,
-            { fit: Boolean(message.fit) }
-          );
-        },
-        "clear-municipality-highlight": function () {
-          frame.contentWindow.clearMunicipalityHighlight();
-        },
-        "set-map-metrics": function () {
-          frame.contentWindow.setMapMetrics(message.metrics);
-        },
-        "set-boundary-visibility": function () {
-          frame.contentWindow.setMunicipalityBoundariesVisible(message.visible);
-        }
-      }[message.type];
-
-      try {
-        if (direct) { direct(); return; }
-      } catch (_error) {
-        // Fall back to postMessage when direct srcdoc access is blocked.
-      }
-
-      frame.contentWindow.postMessage(message, "*");
+      if (frame && frame.contentWindow) frame.contentWindow.postMessage(message, "*");
     }
 
     function currentMetrics() {
