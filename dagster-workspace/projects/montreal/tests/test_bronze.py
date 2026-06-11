@@ -7,8 +7,10 @@ import dagster as dg
 import geopandas as gpd
 import pandas as pd
 import pytest
+from dagster import DagsterInstance
 from shapely.geometry import Point
 
+from montreal.defs.assets.bronze import _config
 from montreal.defs.assets.bronze import (
     addresses,
     bike_paths,
@@ -66,10 +68,6 @@ class FakeStore(s3_datastore):
             return None
         return datetime.now(timezone.utc) - timedelta(days=self.latest_age_days)
 
-    def latest_stamp(self, directory):
-        _CALLS.append("reuse")
-        return "STAMP"
-
     def write_gpq(self, context, gdf):
         _CALLS.append("write")
         return "STAMP"
@@ -112,16 +110,39 @@ def _dummy_asset_and_contract():
 
 
 
-def test_fresh_snapshot_is_reused_without_fetching():
+def _counting_fetch(fetched: list[str]):
+    def fetch(ctx):
+        fetched.append("called")
+        return gpd.GeoDataFrame(geometry=[Point(0, 0)], crs=4326)
+    return fetch
+
+
+def test_fresh_snapshot_with_unchanged_code_is_reused_without_fetching(tmp_path):
     _CALLS.clear()
     fetched = []
-    result = _build(
-        fetch=lambda ctx: fetched.append("called"),
-        store=FakeStore(bucket_name="b", region_name="r", latest_age_days=1),
-    )
+    asset, _ = raw_geo_asset("montreal_fixture", META, CONTRACT, fetch=_counting_fetch(fetched))
+    store = FakeStore(bucket_name="b", region_name="r", latest_age_days=1)
+    with DagsterInstance.local_temp(str(tmp_path)) as instance:
+        dg.materialize([asset], resources={"s3_datastore": store}, instance=instance)  # seed
+        result = dg.materialize([asset], resources={"s3_datastore": store}, instance=instance)
     assert result.success
-    assert _CALLS == ["reuse"]
-    assert fetched == []
+    assert fetched == ["called"]  # only the seeding run fetched
+    assert _CALLS == ["write"]
+
+
+def test_code_version_change_refetches_despite_fresh_snapshot(tmp_path, monkeypatch):
+    _CALLS.clear()
+    fetched = []
+    store = FakeStore(bucket_name="b", region_name="r", latest_age_days=1)
+    with DagsterInstance.local_temp(str(tmp_path)) as instance:
+        asset, _ = raw_geo_asset("montreal_fixture", META, CONTRACT, fetch=_counting_fetch(fetched))
+        dg.materialize([asset], resources={"s3_datastore": store}, instance=instance)
+        monkeypatch.setattr(_config, "CODE_VERSION", "bumped")
+        asset, _ = raw_geo_asset("montreal_fixture", META, CONTRACT, fetch=_counting_fetch(fetched))
+        result = dg.materialize([asset], resources={"s3_datastore": store}, instance=instance)
+    assert result.success
+    assert fetched == ["called", "called"]
+    assert _CALLS == ["write", "write"]
 
 
 def test_stale_snapshot_triggers_fetch_and_write():
@@ -171,7 +192,7 @@ def _run_checks_over(frame: gpd.GeoDataFrame) -> dict[str, bool]:
     _CALLS.clear()
     _READ_FRAME = frame
     asset, checks = raw_geo_asset("montreal_fixture", META, CONTRACT, fetch=lambda ctx: None)
-    # Fresh snapshot so the asset reemits; the checks read `frame` via read_gpq.
+    # Ephemeral instance (no provenance) so the asset refetches; the checks read `frame` via read_gpq.
     result = dg.materialize(
         [asset, *checks],
         resources={"s3_datastore": FakeStore(bucket_name="b", region_name="r", latest_age_days=1)},

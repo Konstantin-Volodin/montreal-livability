@@ -1,4 +1,4 @@
-"""In-run data-version cache gate for derived (silver/gold) assets.
+"""In-run data-version cache gate (silver/gold; bronze composes it with its freshness window).
 
 The pipeline runs as one ephemeral job/month with no daemon, so
 ``AutomationCondition`` never fires -- the skip has to happen inside the run.

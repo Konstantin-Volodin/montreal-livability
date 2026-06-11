@@ -5,6 +5,8 @@ from typing import Callable, Dict, Sequence
 import dagster as dg
 import geopandas as gpd
 
+from montreal import __version__ as CODE_VERSION
+from montreal.defs.assets._cache import reuse_if_unchanged
 from montreal.defs.checks.factory import standard_checks
 from montreal.defs.resources.lakehouse import s3_datastore
 
@@ -33,20 +35,18 @@ def raw_geo_asset(
     contract: BronzeAssetDataContract,
     fetch: Fetch,
 ):
-    """Bronze asset factory. Reuses S3 snapshot if younger than max_days, else fetches fresh."""
+    """Bronze asset factory. Reuses the S3 snapshot while it's younger than max_days
+    AND the code version is unchanged; else fetches fresh."""
 
-    @dg.asset(name=name, group_name="raw_data", metadata=asdict(meta))
+    @dg.asset(name=name, group_name="raw_data", metadata=asdict(meta), code_version=CODE_VERSION)
     def _asset(context: dg.AssetExecutionContext, s3_datastore: s3_datastore) -> dg.MaterializeResult:
         directory = s3_datastore.asset_dir(context)
         last = s3_datastore.latest_timestamp(directory)
         age = None if last is None else datetime.datetime.now(datetime.timezone.utc) - last
 
-        if age is not None and age <= datetime.timedelta(days=contract.freshness["max_days"]):
-            context.log.info(f"Using snapshot for {directory} ({age.days}d old).")
-            return dg.MaterializeResult(
-                data_version=dg.DataVersion(s3_datastore.latest_stamp(directory)),
-                metadata={"s3_cache_hit": True},
-            )
+        fresh = age is not None and age <= datetime.timedelta(days=contract.freshness["max_days"])
+        if fresh and (cached := reuse_if_unchanged(context)):
+            return cached
 
         context.log.info("Downloading latest dataset")
         stamp = s3_datastore.write_gpq(context, fetch(context))

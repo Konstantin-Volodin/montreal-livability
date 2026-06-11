@@ -62,7 +62,7 @@ Folium choropleth: aggregate scores to `h3_r9` cells, color by mean livability, 
 
 ### Caching
 - in-run data-version gate - reuse a snapshot when every upstream version + `code_version` is unchanged
-- bronze self-gates on freshness - re-fetches only when the cached snapshot is older than `max_days`
+- bronze re-fetches when the cached snapshot is older than `max_days` or the code version changed
 - a cache miss logs its reason (upstream moved, code changed, no prior run)
 
 ### Data quality
