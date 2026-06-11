@@ -82,7 +82,7 @@ def nearest(addr_df, amenity_df, max_k=10, log=None) -> pd.DataFrame:
             if len(cands) == 0: continue
             pos = np.flatnonzero(cells == addr_cell)
             cat_dists[pos] = np.nanmin(haversine(
-                coords[pos, [1]], coords[pos, [0]],
+                coords[pos, 1][:, None], coords[pos, 0][:, None],
                 cands[None, :, 1], cands[None, :, 0],
             ), axis=1)
 
