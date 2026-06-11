@@ -57,7 +57,7 @@ Prints `ClusterArn` / `TaskDefinitionArn` / `Subnets` / `SecurityGroupId` (consu
 
 ```powershell
 python run.py                                 # fire a run now, don't wait for the 1st
-aws logs tail /ecs/livability --follow        # follow it in CloudWatch
+aws logs tail /ecs/livability --follow --region ca-central-1   # follow it in CloudWatch
 
 cdk deploy -c schedule_state=DISABLED         # pause the monthly run (run.py still works)
 cdk deploy                                    # resume
