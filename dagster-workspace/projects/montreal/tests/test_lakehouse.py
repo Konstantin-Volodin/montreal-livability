@@ -1,9 +1,10 @@
 """Tests for the S3 lakehouse resource: path/format helpers, WGS84 normalization,
-parquet read fallback, and sharded-write reconciliation."""
+parquet read fallback, sharded-write reconciliation, and resource env binding."""
 
 import io
 import logging
 import re
+from pathlib import Path
 
 import dagster as dg
 import geopandas as gpd
@@ -106,3 +107,19 @@ def test_write_gpq_partitioned_removes_stale_shards():
 
     combined = store.read_gpq_prefix(ctx, base)
     assert list(combined["h3_r6"]) == ["A"]
+
+
+
+
+def test_jobs_resolve_without_static_aws_keys(monkeypatch):
+    """On Fargate the task role supplies credentials and no AWS_* env vars exist;
+    run-config resolution must not demand them (EnvVar hard-fails when unset)."""
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
+    monkeypatch.setenv("S3_BUCKET", "bucket")
+    monkeypatch.setenv("S3_REGION", "ca-central-1")
+
+    import montreal.definitions as md
+
+    defs = dg.load_from_defs_folder(path_within_project=Path(md.__file__).parent)
+    assert dg.validate_run_config(defs.get_job_def("pre_partition_job"))
