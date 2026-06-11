@@ -30,7 +30,8 @@ ASSET_DATA_CONTRACT = BronzeAssetDataContract(
         "fclass": "str",
         "geometry": "geometry",
     },
-    uniqueness=("osm_id",),
+    # OSM ids are only unique per element type (a node and a way can share an id).
+    uniqueness=("osm_type", "osm_id"),
     completeness=("fclass", "geometry"),
     freshness={"max_days": 25},
 )
