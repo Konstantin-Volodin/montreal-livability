@@ -143,6 +143,8 @@ def materialize_partitions(partitions: list[str]) -> None:
 
 
 def main() -> int:
+    if not S3_BUCKET:
+        raise SystemExit("S3_BUCKET is not set; refusing to start a batch whose quality report cannot be written")
     with efs_state():
         # pre partitioned section
         subprocess.run(["dagster", "job", "execute", "-m", MODULE, "-j", "pre_partition_job"], check=True)

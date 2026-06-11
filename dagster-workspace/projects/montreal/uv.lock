@@ -2021,7 +2021,7 @@ wheels = [
 
 [[package]]
 name = "montreal"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "dagster" },
@@ -2034,7 +2034,6 @@ dependencies = [
     { name = "jinja2" },
     { name = "matplotlib" },
     { name = "pyarrow" },
-    { name = "pytest" },
     { name = "s3fs" },
     { name = "sqlescapy" },
     { name = "universal-pathlib" },
@@ -2044,6 +2043,7 @@ dependencies = [
 dev = [
     { name = "dagster-dg-cli" },
     { name = "dagster-webserver" },
+    { name = "pytest" },
 ]
 
 [package.metadata]
@@ -2058,7 +2058,6 @@ requires-dist = [
     { name = "jinja2", specifier = ">=3.1.0" },
     { name = "matplotlib", specifier = ">=3.9.0" },
     { name = "pyarrow", specifier = ">=24.0.0" },
-    { name = "pytest", specifier = ">=9.0.3" },
     { name = "s3fs", specifier = ">=2026.4.0" },
     { name = "sqlescapy", specifier = ">=1.0.1" },
     { name = "universal-pathlib", specifier = ">=0.3.10" },
@@ -2068,6 +2067,7 @@ requires-dist = [
 dev = [
     { name = "dagster-dg-cli" },
     { name = "dagster-webserver" },
+    { name = "pytest", specifier = ">=9.0.3" },
 ]
 
 [[package]]
